@@ -1,0 +1,20 @@
+# data
+data/raw/
+data/processed/
+*.edf
+*.bdf
+
+# results
+results/
+*.pt
+*.ckpt
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.pytest_cache/
+
+# os
+.DS_Store

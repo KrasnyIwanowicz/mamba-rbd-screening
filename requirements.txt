@@ -1,0 +1,12 @@
+numpy
+scipy
+pandas
+scikit-learn
+torch>=2.0
+mne              # EDF/PSG parsing, same as parkinsons-eeg-classifier
+pyedflib         # CAP Sleep Database uses plain EDF, mne can struggle with some annotation formats
+matplotlib
+shap
+pyyaml
+pytest
+mypy

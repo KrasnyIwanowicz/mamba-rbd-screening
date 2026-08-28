@@ -1,0 +1,29 @@
+# mamba-rbd-screening default config
+# Mirrors the config.yaml pattern from mamba-eeg-sleep-staging / parkinsons-eeg-classifier
+
+data:
+  cap_root: "data/raw/capslpdb"        # PhysioNet CAP Sleep Database
+  groups_include: ["rbd", "n"]         # RBD patients + normal controls (n = healthy)
+  sample_rate_hz: 100                  # resample target (verify native rate per recording first)
+  epoch_length_s: 30                   # standard AASM epoch length, matches sleep-stager
+
+sleep_stager:
+  checkpoint: "external/sleep_staging/results/checkpoints/mamba_head_best.pt"
+  # NOTE: this checkpoint was trained on Sleep-EDF-20 (different hardware/montage
+  # than CAP). Phase 2 must measure the domain-shift drop before trusting outputs.
+
+rswa_detector:
+  emg_channel_candidates: ["EMG1", "EMG1-EMG2", "Chin1-Chin2"]  # verify per-recording (Phase 1)
+  feature_set: ["emg_rms", "emg_variance", "eeg_theta_power", "eeg_beta_power"]
+  model: "logistic_regression"   # baseline first, same discipline as SVM-first in the PD project
+  use_dt_aware_block: false      # Phase 4: flip only after a fair head-to-head test, not by default
+
+validation:
+  scheme: "leave_one_subject_out"
+  seeds: [0, 1, 2]
+
+training:
+  lr: 1.0e-3
+  batch_size: 16
+  max_epochs: 30
+  grad_clip_norm: 1.0
