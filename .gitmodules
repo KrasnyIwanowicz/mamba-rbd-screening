@@ -1,0 +1,3 @@
+[submodule "external/sleep_staging"]
+	path = external/sleep_staging
+	url = https://github.com/KrasnyIwanowicz/mamba-eeg-sleep-staging.git
