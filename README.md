@@ -1,4 +1,4 @@
-# 🌙 mamba-rbd-screening
+# mamba-rbd-screening
 
 **Can a dry-electrode EEG + IMU wearable flag REM Sleep Without Atonia (RSWA) — the prodromal signature of Parkinson's/Lewy-body disease — using a sequence model that already exists, or does the EMG→IMU substitution break the signal entirely?**
 
@@ -11,7 +11,7 @@ A screening pipeline that chains two already-validated components — [`mamba-ee
 
 ---
 
-## ⚠️ Framing, stated up front
+## Framing, stated up front
 
 This is a **research / engineering portfolio project**, not a diagnostic device and not yet a company. It produces a risk score for further clinical evaluation, never a diagnosis. Two things it explicitly does **not** claim, in contrast to an earlier concept draft:
 

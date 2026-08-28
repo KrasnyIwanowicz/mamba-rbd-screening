@@ -1,12 +1,3 @@
-"""
-Per-subject REM-epoch dataset construction, group-aware (subject-level) split.
-
-Same shape as parkinsons-eeg-classifier/src/dataset.py and
-mamba-eeg-sleep-staging/src/dataset.py -- subject-independent splitting is
-non-negotiable here too, arguably more so: n is even smaller (CAP's RBD
-group is roughly a dozen subjects), so a leaked subject would dominate any
-reported metric.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,10 +15,6 @@ class RSWAEpochSample:
 
 
 def leave_one_subject_out_splits(samples: list[RSWAEpochSample]):
-    """
-    Yields (train_idx, test_idx) leaving one subject fully out each fold --
-    mirrors parkinsons-eeg-classifier's use of sklearn's LeaveOneGroupOut.
-    """
     X = np.arange(len(samples))
     groups = [s.subject_id for s in samples]
     logo = LeaveOneGroupOut()

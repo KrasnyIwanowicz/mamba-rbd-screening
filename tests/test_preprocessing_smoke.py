@@ -1,8 +1,3 @@
-"""
-Synthetic-data smoke tests — no dataset download needed, same pattern as
-the 17 synthetic-data tests in parkinsons-eeg-classifier and the
-per-phase tests in mamba-eeg-sleep-staging.
-"""
 import numpy as np
 
 from src.preprocessing import bandpass_filter, emg_rms_envelope, extract_rem_epochs
@@ -26,9 +21,6 @@ def test_emg_rms_envelope_nonnegative():
 
 
 def test_emg_rms_envelope_higher_for_higher_amplitude_signal():
-    # Sanity check on the actual clinical logic: more muscle activity ->
-    # higher RMS envelope. If this ever fails, the envelope function is
-    # broken, not just "different," since this is a monotonic physical fact.
     fs = 200.0
     n = int(fs * 5)
     quiet = np.zeros(n)
