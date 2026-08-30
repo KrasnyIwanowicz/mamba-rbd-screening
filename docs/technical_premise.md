@@ -15,6 +15,30 @@ Update this file, don't quietly let the README drift from it.
   explicitly warn against treating this as diagnostically meaningful at this
   sample size - that warning applies with equal force here.
 
+## Corrected 2026-08-28, after real CAP data was downloaded and audited
+
+- **CAP Sleep Database has NO per-epoch RSWA/atonia-loss ground truth.**
+  Verified directly against physionet.org/content/capslpdb/1.0.0/: the only
+  annotations are R&K sleep macrostructure (W/S1-S4/REM) and CAP
+  microstructure (phase A/B, subtypes A1/A2/A3) - an EEG phenomenon
+  unrelated to muscle tone. Phase 3's original framing ("train a
+  classifier on EMG ground truth") has no epoch-level labels to train
+  against in this dataset. `src/rswa_scoring.py` replaces the supervised-
+  classifier framing with a rule-based scorer (chin EMG RMS vs. each
+  subject's own NREM baseline), which is arguably more appropriate anyway
+  since RSWA is a clinically *defined* quantity, not a pattern to discover.
+  What IS still valid to check with CAP: whether this rule's rswa_index is
+  higher, at the subject level, in the "rbd" group than the "n" group -
+  because subject-level group labels are real ground truth here. Per-epoch
+  precision/recall against a gold standard is NOT something this dataset
+  can validate.
+- **The `.txt` annotation parser had a silent, universal bug** (see
+  PATCH_NOTES.md) that made `parse_txt_annotations` return zero rows for
+  every subject, regardless of the Position field's format. Fixed by
+  anchoring the split on the one fixed-format token (the hh:mm:ss time)
+  instead of a naive whitespace split. Covered by
+  `tests/test_cap_loader.py` now, specifically to catch a regression.
+
 ## Hypothesis - to be tested
 
 - **Dt-aware Mamba discretization might help on irregularly-gapped overnight

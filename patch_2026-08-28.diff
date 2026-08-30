@@ -1,0 +1,539 @@
+diff --git a/PATCH_NOTES.md b/PATCH_NOTES.md
+new file mode 100644
+index 0000000..abaf90b
+--- /dev/null
++++ b/PATCH_NOTES.md
+@@ -0,0 +1,69 @@
++# Patch notes — 2026-08-28
++
++Based on reviewing the repo as of commit `441362b` ("load CAP, work on pipeline").
++I can't push to your GitHub directly (no write access, only read via public
++clone), so these are the changed/new files to copy into your local clone
++and commit yourself.
++
++## 1. Critical bug fix: `src/data/cap_loader.py`
++
++`parse_txt_annotations` used `re.split(r"\s+", line)` and assumed
++`parts[2]` was the Duration column. It never was — the real row format is
++`Stage \t Position \t Time[hh:mm:ss] \t Event \t Duration[s] \t Location`,
++and `parts[2]` is either part of "Unknown Position" or the Time field,
++depending on whether Position is one word or two. Either way,
++`float(parts[2])` throws on every single row, every subject, so
++`df_stages` came out empty and `load_subject()` silently returned `[]`
++with no error.
++
++**Fix:** anchor the split on the one fixed-format token in the row — the
++`hh:mm:ss` time — via regex, instead of a naive whitespace split. Also now
++filters strictly on `Event.startswith("SLEEP-")` so CAP microstructure
++rows (`MCAP-A1/A2/A3`, interleaved with the real epochs, variable
++duration) don't get miscounted as extra 30s epochs and shift the
++alignment between `df_stages` rows and the signal windows sliced in
++`load_subject`.
++
++Added `tests/test_cap_loader.py` — regression tests using synthetic data
++in the real format, so this specific bug can't silently come back.
++
++## 2. Premise correction: RSWA has no per-epoch labels in this dataset
++
++Verified against physionet.org/content/capslpdb/1.0.0/: CAP's annotations
++are R&K sleep macrostructure + CAP (EEG) microstructure only — nothing
++about muscle tone events. The original Phase 3 plan ("train a classifier
++on EMG ground truth") assumed a label that doesn't exist here.
++
++Added `src/rswa_scoring.py`: a rule-based scorer (chin EMG RMS per REM
++epoch vs. that subject's own median NREM RMS as baseline,
++`threshold_multiplier` controls sensitivity) instead of a supervised
++classifier. This is validated with `tests/test_rswa_scoring.py`. It
++produces a per-subject `rswa_index` — legitimately comparable between the
++"rbd" and "n" groups (real ground truth), but NOT a per-epoch
++precision/recall number against any gold standard (none exists here).
++
++Updated `docs/technical_premise.md` and this note explain the distinction
++so a future readme/pitch doesn't quietly conflate the two.
++
++## 3. Housekeeping
++
++- `requirements.txt`: added `tqdm` (used by `scripts/download_cap.py` and
++  `scripts/audit_cap_channels.py`, wasn't listed).
++- `src/data_loader.py`: added a header note flagging it as the old Phase 0
++  stub, now superseded by `src/data/cap_loader.py`. Recommend deleting it
++  (and `src/dataset.py` if nothing imports it yet) rather than maintaining
++  two loaders in parallel — didn't delete it myself since that's a bigger
++  call than a bug fix.
++
++## Not done yet (didn't want to guess)
++
++- `scripts/audit_cap_channels.py` needs to actually run against your local
++  40GB download to know the real per-subject channel names — I can't run
++  that here (the files aren't on this machine and physionet.org's raw
++  files are too large / not in this sandbox's reachable domains). Once you
++  run it, share `reports/cap_channel_audit.csv` and I can help interpret
++  it and wire the confirmed channel names into `CAPSleepDataset`.
++- `src/pipeline.py` and `src/dataset.py` are still the original Phase 0
++  stubs — wiring the sleep-stager submodule + `rswa_scoring.py` into an
++  actual end-to-end script is the natural next step once the channel audit
++  confirms which EEG channel to feed the stager.
+diff --git a/docs/technical_premise.md b/docs/technical_premise.md
+index dcdb7b1..602a62c 100644
+--- a/docs/technical_premise.md
++++ b/docs/technical_premise.md
+@@ -15,6 +15,30 @@ Update this file, don't quietly let the README drift from it.
+   explicitly warn against treating this as diagnostically meaningful at this
+   sample size - that warning applies with equal force here.
+ 
++## Corrected 2026-08-28, after real CAP data was downloaded and audited
++
++- **CAP Sleep Database has NO per-epoch RSWA/atonia-loss ground truth.**
++  Verified directly against physionet.org/content/capslpdb/1.0.0/: the only
++  annotations are R&K sleep macrostructure (W/S1-S4/REM) and CAP
++  microstructure (phase A/B, subtypes A1/A2/A3) - an EEG phenomenon
++  unrelated to muscle tone. Phase 3's original framing ("train a
++  classifier on EMG ground truth") has no epoch-level labels to train
++  against in this dataset. `src/rswa_scoring.py` replaces the supervised-
++  classifier framing with a rule-based scorer (chin EMG RMS vs. each
++  subject's own NREM baseline), which is arguably more appropriate anyway
++  since RSWA is a clinically *defined* quantity, not a pattern to discover.
++  What IS still valid to check with CAP: whether this rule's rswa_index is
++  higher, at the subject level, in the "rbd" group than the "n" group -
++  because subject-level group labels are real ground truth here. Per-epoch
++  precision/recall against a gold standard is NOT something this dataset
++  can validate.
++- **The `.txt` annotation parser had a silent, universal bug** (see
++  PATCH_NOTES.md) that made `parse_txt_annotations` return zero rows for
++  every subject, regardless of the Position field's format. Fixed by
++  anchoring the split on the one fixed-format token (the hh:mm:ss time)
++  instead of a naive whitespace split. Covered by
++  `tests/test_cap_loader.py` now, specifically to catch a regression.
++
+ ## Hypothesis - to be tested
+ 
+ - **Dt-aware Mamba discretization might help on irregularly-gapped overnight
+diff --git a/requirements.txt b/requirements.txt
+index de0ef87..20c4588 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,6 +1,7 @@
+ numpy
+ scipy
+ pandas
++tqdm             # używane w scripts/download_cap.py i scripts/audit_cap_channels.py
+ scikit-learn
+ torch>=2.0
+ mne              # EDF/PSG parsing, same as parkinsons-eeg-classifier
+diff --git a/src/data/cap_loader.py b/src/data/cap_loader.py
+index 527d532..b777c78 100644
+--- a/src/data/cap_loader.py
++++ b/src/data/cap_loader.py
+@@ -1,10 +1,16 @@
+ from dataclasses import dataclass
+ from pathlib import Path
+ import re
++import warnings
+ import mne
+ import numpy as np
+ import pandas as pd
+ 
++# Kotwiczymy parser na jednym, stałoformatowym tokenie -- czasie hh:mm:ss --
++# zamiast dzielić linię po białych znakach. Patrz uzasadnienie w docstringu
++# parse_txt_annotations() poniżej.
++_TIME_RE = re.compile(r"\b\d{2}:\d{2}:\d{2}\b")
++
+ 
+ @dataclass
+ class EpochRecord:
+@@ -36,32 +42,79 @@ class CAPSleepDataset:
+         self.epoch_samples = target_fs * epoch_len_sec
+ 
+     def parse_txt_annotations(self, txt_path: Path) -> pd.DataFrame:
+-        """Parsuje plik tekstowy adnotacji stadiów snu z CAP."""
+-        records = []
++        """Parsuje plik tekstowy adnotacji stadiów snu z CAP (REMlogic export).
++
++        POPRAWKA (2026-08-28): poprzednia wersja dzieliła linię przez
++        `re.split(r"\\s+", line)` i zakładała, że parts[2] to Duration.
++        Realny format wiersza to:
++            Stage \\t Position \\t Time[hh:mm:ss] \\t Event \\t Duration[s] \\t Location
++        Pole Position może zawierać spację ("Unknown Position"), a NAWET
++        gdy jest jednym słowem ("Left"), parts[2] to i tak Time, nie
++        Duration. W obu przypadkach `float(parts[2])` rzuca ValueError na
++        KAŻDYM wierszu -> df_stages wychodziło puste dla każdego pacjenta,
++        a load_subject() cicho zwracało [] bez żadnego błędu. Sprawdzone
++        na realnym rbd1.txt z physionet.org.
++
++        Nowe podejście: kotwiczymy się na jedynym stałoformatowym tokenie w
++        wierszu -- czasie hh:mm:ss. Wszystko przed nim to Stage+Position
++        (Position może mieć spację), wszystko po nim to Event, Duration,
++        Location -- te trzy pola NIE mają spacji, więc zwykły split() już
++        działa bezpiecznie.
++
++        Dodatkowo plik miesza wiersze makrostruktury (Event zaczyna się od
++        "SLEEP-", Duration==30, jedna epoka na wiersz) z wierszami CAP
++        mikrostruktury (Event zaczyna się od "MCAP-A1/A2/A3", zmienny czas
++        trwania, mogą wypadać W TEJ SAMEJ epoce co wiersz SLEEP-*). Bez
++        filtrowania po prefiksie "SLEEP-" te dodatkowe wiersze zostałyby
++        policzone jako osobne "epoki" i zepsuły wyrównanie index-do-index
++        z oknami wyciętymi z sygnału w load_subject().
++        """
+         with open(txt_path, "r", encoding="latin-1") as f:
+-            lines = f.readlines()
++            lines = f.read().splitlines()
+ 
+-        start_reading = False
+-        for line in lines:
++        header_idx = next((i for i, l in enumerate(lines) if "Sleep Stage" in l), None)
++        if header_idx is None:
++            warnings.warn(f"{txt_path.name}: nie znaleziono nagłówka 'Sleep Stage' -- zwracam pustą ramkę.")
++            return pd.DataFrame(columns=["stage", "duration", "time"])
++
++        records = []
++        for line in lines[header_idx + 1 :]:
+             line = line.strip()
+-            if "Sleep Stage" in line or "STAGE" in line:
+-                start_reading = True
++            if not line:
+                 continue
+-            if not start_reading or not line:
++
++            m = _TIME_RE.search(line)
++            if not m:
+                 continue
+ 
+-            parts = re.split(r"\s+", line)
+-            # Format w CAP to zazwyczaj: [Sleep Stage, Time [hh:mm:ss], Duration[s], Position...]
+-            if len(parts) >= 3:
+-                stage_raw = parts[0]
+-                stage_norm = self.STAGE_MAP.get(stage_raw, "UNKNOWN")
+-                try:
+-                    duration = float(parts[2])
+-                    records.append({"stage": stage_norm, "duration": duration})
+-                except ValueError:
+-                    continue
++            before = line[: m.start()].strip()
++            after = line[m.end() :].strip()
++
++            before_parts = before.split(None, 1)
++            if not before_parts:
++                continue
++            stage_raw = before_parts[0]
+ 
+-        return pd.DataFrame(records)
++            after_parts = after.split()
++            if len(after_parts) < 3:
++                continue
++            event, duration_str, _location = after_parts[0], after_parts[1], after_parts[2]
++
++            if not event.startswith("SLEEP-"):
++                continue  # pomijamy zdarzenia CAP (MCAP-A1/A2/A3) -- to nie są 30s epoki
++
++            try:
++                duration = float(duration_str)
++            except ValueError:
++                continue
++
++            stage_norm = self.STAGE_MAP.get(stage_raw, "UNKNOWN")
++            if stage_norm == "UNKNOWN":
++                warnings.warn(f"{txt_path.name}: nieznana etykieta stadium '{stage_raw}' w wierszu: {line!r}")
++
++            records.append({"stage": stage_norm, "duration": duration, "time": m.group(0)})
++
++        return pd.DataFrame(records, columns=["stage", "duration", "time"])
+ 
+     def load_subject(self, subject_id: str, rem_only: bool = True) -> list[EpochRecord]:
+         """Wczytuje sygnały EMG/EEG i adnotacje dla danego pacjenta."""
+@@ -95,6 +148,13 @@ class CAPSleepDataset:
+         # Jeśli są adnotacje .txt
+         if txt_path.exists():
+             df_stages = self.parse_txt_annotations(txt_path)
++            if len(df_stages) == 0:
++                warnings.warn(
++                    f"[!] {subject_id}: 0 epok stadium wczytanych z {txt_path.name} -- "
++                    f"to prawie na pewno błąd parsera, nie brak danych. Sprawdź plik ręcznie "
++                    f"przed zaufaniem pustemu wynikowi."
++                )
++                return []
+             for i in range(min(total_epochs, len(df_stages))):
+                 stage = df_stages.iloc[i]["stage"]
+                 if rem_only and stage != "REM":
+diff --git a/src/data_loader.py b/src/data_loader.py
+index 661819a..9348f28 100644
+--- a/src/data_loader.py
++++ b/src/data_loader.py
+@@ -1,4 +1,12 @@
+-
++"""
++UWAGA (2026-08-28): TEN plik to niedotknięty stub z Fazy 0. Prawdziwa,
++działająca implementacja loadera CAP jest teraz w `src/data/cap_loader.py`
++(CAPSleepDataset), napisana niezależnie i już realnie testowana na
++pobranym zbiorze. Trzymanie dwóch loaderów obok siebie to prosta droga do
++sytuacji "który jest aktualny?" za tydzień -- polecam usunąć ten plik (i
++src/dataset.py, jeśli nic go jeszcze nie importuje) albo jasno oznaczyć
++jako martwy kod, zamiast rozwijać oba równolegle.
++"""
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
+diff --git a/src/rswa_scoring.py b/src/rswa_scoring.py
+new file mode 100644
+index 0000000..667404c
+--- /dev/null
++++ b/src/rswa_scoring.py
+@@ -0,0 +1,84 @@
++"""
++Scoring RSWA (REM Sleep Without Atonia) z sygnału EMG podbródkowego.
++
++WAŻNA KOREKTA ZAŁOŻENIA (2026-08-28): CAP Sleep Database NIE zawiera
++żadnych per-epokowych etykiet RSWA/utraty atonii mięśniowej. Adnotacje w
++plikach .txt to wyłącznie: (1) makrostruktura R&K (W/S1-S4/REM) i
++(2) mikrostruktura CAP (fazy A/B, podtypy A1/A2/A3) -- zjawisko EEG
++zupełnie niezwiązane z napięciem mięśniowym. Sprawdzone bezpośrednio na
++stronie physionet.org/content/capslpdb/1.0.0/ (sekcja "Annotations").
++
++To oznacza, że pierwotny plan Fazy 3 ("wytrenuj klasyfikator na etykietach
++EMG") nie ma w tym zbiorze żadnych etykiet do trenowania na poziomie epoki.
++Zamiast tego RSWA liczymy tu regułą kliniczną (uproszczoną z kryteriów
++SINBAR/Montreal -- Frauscher i wsp. 2012, Montplaisir i wsp. 2010), a nie
++uczonym klasyfikatorem. To akurat lepiej pasuje do natury problemu: RSWA
++to wielkość KLINICZNIE ZDEFINIOWANA (podwyższone napięcie/wybuchy EMG
++względem linii bazowej NREM), a nie wzorzec do "odkrycia" przez model.
++
++Co TO pozwala zwalidować na CAP: czy rswa_index policzony tą regułą jest
++wyższy, na poziomie pacjenta, w grupie "rbd" niż w grupie "n" (zdrowi) --
++to legalne porównanie statystyczne, bo etykiety grupowe SĄ prawdziwym
++ground truth w tym zbiorze (diagnoza kliniczna, nie coś co sami wymyśliliśmy).
++
++Czego to NIE pozwala zwalidować: precyzji/recall per-epokowego względem
++złotego standardu scoringu RSWA -- bo takiej etykiety tu po prostu nie ma
++(wymagałaby to oryginalnego przeglądu wideo-PSG, którego nie ma w tym
++publicznym zbiorze). Trzeba być precyzyjnym, które z tych dwóch twierdzeń
++faktycznie popiera dany wynik -- nie mieszać jednego z drugim w raporcie.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++import numpy as np
++
++
++@dataclass
++class RSWAScoreResult:
++    epoch_rms: np.ndarray  # (n_rem_epochs,) RMS EMG podbródkowego per epoka REM
++    nrem_baseline_rms: float  # mediana RMS EMG z epok N2/N3 tego pacjenta
++    atonia_lost: np.ndarray  # (n_rem_epochs,) bool
++    rswa_index: float  # odsetek epok REM oznaczonych jako utrata atonii -- wynik na poziomie pacjenta
++
++
++def compute_nrem_baseline(nrem_epoch_signals: list[np.ndarray]) -> float:
++    """
++    Mediana RMS EMG podbródkowego z epok N2/N3 tego pacjenta -- referencyjny
++    poziom "spokojnego mięśnia". Liczona per pacjent (nie jeden stały próg
++    dla wszystkich), bo surowa amplituda EMG zależy od impedancji elektrod
++    i wzmocnienia, które różnią się między 108 nagraniami w tym
++    wieloośrodkowym archiwum (ta sama ostrożność co przy nazwach kanałów
++    udokumentowana w docs/technical_premise.md).
++    """
++    if not nrem_epoch_signals:
++        raise ValueError("Potrzeba co najmniej jednej epoki NREM (N2/N3) do ustalenia linii bazowej.")
++    rms_values = [float(np.sqrt(np.mean(np.square(epoch)))) for epoch in nrem_epoch_signals]
++    return float(np.median(rms_values))
++
++
++def score_rswa(
++    rem_epoch_signals: list[np.ndarray],
++    nrem_epoch_signals: list[np.ndarray],
++    threshold_multiplier: float = 2.0,
++) -> RSWAScoreResult:
++    """
++    threshold_multiplier=2.0 to punkt startowy, NIE zwalidowany próg
++    kliniczny -- kryteria SINBAR/Montreal używają konkretnych warunków
++    amplitudy ORAZ czasu trwania (rozróżnienie tonic/phasic, minimalny
++    czas trwania wybuchu), znacznie bardziej szczegółowych niż pojedynczy
++    stosunek RMS. To celowo prosty pierwszy baseline (ta sama dyscyplina
++    "klasyczny baseline przed głębokim modelem" co w parkinsons-eeg-
++    classifier), do dopracowania dopiero gdy realne nagrania CAP będą
++    dostępne do strojenia -- nie gotowy scorer kliniczny.
++    """
++    baseline = compute_nrem_baseline(nrem_epoch_signals)
++    epoch_rms = np.array([np.sqrt(np.mean(np.square(epoch))) for epoch in rem_epoch_signals])
++    atonia_lost = epoch_rms > (threshold_multiplier * baseline)
++    rswa_index = float(np.mean(atonia_lost)) if len(atonia_lost) > 0 else float("nan")
++    return RSWAScoreResult(
++        epoch_rms=epoch_rms,
++        nrem_baseline_rms=baseline,
++        atonia_lost=atonia_lost,
++        rswa_index=rswa_index,
++    )
+diff --git a/tests/test_cap_loader.py b/tests/test_cap_loader.py
+new file mode 100644
+index 0000000..dc14572
+--- /dev/null
++++ b/tests/test_cap_loader.py
+@@ -0,0 +1,104 @@
++"""
++Testy dla CAPSleepDataset.parse_txt_annotations -- w szczególności regresja
++na bugu, który zerował df_stages dla każdego pacjenta (patrz PATCH_NOTES.md).
++
++Dane syntetyczne poniżej naśladują dokładny format realnego pliku
++z physionet.org/content/capslpdb/1.0.0/rbd1.txt (nagłówek, tabulatory,
++przeplatane wiersze SLEEP-*/MCAP-*, pole Position ze spacją w środku) --
++wartości są wymyślone na potrzeby testu, nie skopiowane z żadnego
++prawdziwego rekordu pacjenta.
++"""
++from pathlib import Path
++
++import pytest
++
++from src.data.cap_loader import CAPSleepDataset
++
++SYNTHETIC_TXT = (
++    "RemLogic Event Export\n"
++    "Patient:\tTEST 1\n"
++    "Patient ID:\n"
++    "Recording Date:\t01/01/2000\n"
++    "\n"
++    "Events Included:\n"
++    "MCAP-A1\n"
++    "SLEEP-REM\n"
++    "SLEEP-S0\n"
++    "SLEEP-S1\n"
++    "SLEEP-S2\n"
++    "SLEEP-S3\n"
++    "SLEEP-S4\n"
++    "\n"
++    "Scoring Session:\n"
++    "\n"
++    "Sleep Stage\tPosition\tTime [hh:mm:ss]\tEvent\tDuration[s]\tLocation\n"
++    "W\tUnknown Position\t22:00:00\tSLEEP-S0\t30\tROC-LOC\n"
++    "S2\tLeft\t22:00:30\tSLEEP-S2\t30\tROC-LOC\n"
++    "S2\tLeft\t22:00:45\tMCAP-A1\t6\tEEG-Fp2-F4\n"
++    "S3\tUnknown Position\t22:01:00\tSLEEP-S3\t30\tROC-LOC\n"
++    "R\tSupine\t22:01:30\tSLEEP-REM\t30\tROC-LOC\n"
++    "R\tSupine\t22:02:00\tSLEEP-REM\t30\tROC-LOC\n"
++)
++
++
++@pytest.fixture
++def synthetic_txt_path(tmp_path: Path) -> Path:
++    p = tmp_path / "rbd_test1.txt"
++    p.write_text(SYNTHETIC_TXT, encoding="latin-1")
++    return p
++
++
++def test_parse_txt_annotations_does_not_return_empty_dataframe(synthetic_txt_path):
++    ds = CAPSleepDataset(data_dir=synthetic_txt_path.parent)
++    df = ds.parse_txt_annotations(synthetic_txt_path)
++    # To jest DOKŁADNIE to, co poprzednia wersja psuła: 0 wierszy zawsze.
++    assert len(df) > 0
++
++
++def test_parse_txt_annotations_extracts_correct_stage_sequence(synthetic_txt_path):
++    ds = CAPSleepDataset(data_dir=synthetic_txt_path.parent)
++    df = ds.parse_txt_annotations(synthetic_txt_path)
++    # 5 wierszy SLEEP-* w fixture (MCAP-A1 jest wykluczony -- to nie epoka)
++    assert len(df) == 5
++    assert list(df["stage"]) == ["WAKE", "N2", "N3", "REM", "REM"]
++
++
++def test_parse_txt_annotations_excludes_mcap_microstructure_rows(synthetic_txt_path):
++    ds = CAPSleepDataset(data_dir=synthetic_txt_path.parent)
++    df = ds.parse_txt_annotations(synthetic_txt_path)
++    # Gdyby MCAP-A1 wyciekł do wyniku, mielibyśmy 6 wierszy zamiast 5, i
++    # dodatkowy wpis z duration=6 (zamiast 30) w środku sekwencji.
++    assert (df["duration"] == 30).all()
++
++
++def test_parse_txt_annotations_handles_position_with_embedded_space(synthetic_txt_path):
++    ds = CAPSleepDataset(data_dir=synthetic_txt_path.parent)
++    df = ds.parse_txt_annotations(synthetic_txt_path)
++    # Pierwszy wiersz ma "Unknown Position" (spacja w środku) -- jeśli split
++    # po białych znakach nadal by tu coś psuł, stage wyszedłby błędny.
++    assert df.iloc[0]["stage"] == "WAKE"
++    assert df.iloc[0]["time"] == "22:00:00"
++
++
++def test_parse_txt_annotations_warns_on_unknown_stage_label(tmp_path):
++    bad_txt = (
++        "Sleep Stage\tPosition\tTime [hh:mm:ss]\tEvent\tDuration[s]\tLocation\n"
++        "ZZ\tUnknown Position\t22:00:00\tSLEEP-S0\t30\tROC-LOC\n"
++    )
++    p = tmp_path / "bad.txt"
++    p.write_text(bad_txt, encoding="latin-1")
++    ds = CAPSleepDataset(data_dir=tmp_path)
++
++    with pytest.warns(UserWarning, match="nieznana etykieta"):
++        df = ds.parse_txt_annotations(p)
++    assert df.iloc[0]["stage"] == "UNKNOWN"
++
++
++def test_parse_txt_annotations_missing_header_returns_empty_with_warning(tmp_path):
++    p = tmp_path / "no_header.txt"
++    p.write_text("just some random text\nwith no header at all\n", encoding="latin-1")
++    ds = CAPSleepDataset(data_dir=tmp_path)
++
++    with pytest.warns(UserWarning, match="nie znaleziono nagłówka"):
++        df = ds.parse_txt_annotations(p)
++    assert len(df) == 0
+diff --git a/tests/test_rswa_scoring.py b/tests/test_rswa_scoring.py
+new file mode 100644
+index 0000000..42954fd
+--- /dev/null
++++ b/tests/test_rswa_scoring.py
+@@ -0,0 +1,59 @@
++"""Testy dla src/rswa_scoring.py na syntetycznym EMG."""
++import numpy as np
++import pytest
++
++from src.rswa_scoring import compute_nrem_baseline, score_rswa
++
++
++def _quiet_epoch(n=1000, amplitude=0.05, seed=0):
++    rng = np.random.default_rng(seed)
++    return rng.normal(0, amplitude, size=n)
++
++
++def _active_epoch(n=1000, amplitude=1.0, seed=0):
++    rng = np.random.default_rng(seed)
++    return rng.normal(0, amplitude, size=n)
++
++
++def test_compute_nrem_baseline_requires_at_least_one_epoch():
++    with pytest.raises(ValueError):
++        compute_nrem_baseline([])
++
++
++def test_compute_nrem_baseline_is_median_rms():
++    epochs = [_quiet_epoch(seed=i) for i in range(5)]
++    baseline = compute_nrem_baseline(epochs)
++    assert baseline > 0
++    # powinno być zbliżone do amplitude=0.05 (RMS szumu gaussowskiego ~ sigma)
++    assert 0.03 < baseline < 0.08
++
++
++def test_score_rswa_flags_high_amplitude_rem_epochs_as_atonia_lost():
++    nrem_epochs = [_quiet_epoch(seed=i) for i in range(10)]
++    # 3 ciche epoki REM (atonia zachowana) + 2 głośne (atonia utracona)
++    rem_epochs = [_quiet_epoch(seed=100 + i) for i in range(3)] + [
++        _active_epoch(seed=200 + i) for i in range(2)
++    ]
++
++    result = score_rswa(rem_epochs, nrem_epochs, threshold_multiplier=2.0)
++
++    assert result.atonia_lost.tolist() == [False, False, False, True, True]
++    assert result.rswa_index == pytest.approx(2 / 5)
++
++
++def test_score_rswa_returns_nan_index_with_zero_rem_epochs():
++    nrem_epochs = [_quiet_epoch(seed=i) for i in range(5)]
++    result = score_rswa([], nrem_epochs)
++    assert np.isnan(result.rswa_index)
++    assert len(result.atonia_lost) == 0
++
++
++def test_score_rswa_baseline_scales_with_threshold_multiplier():
++    nrem_epochs = [_quiet_epoch(seed=i) for i in range(10)]
++    rem_epochs = [_active_epoch(amplitude=0.15, seed=i) for i in range(5)]
++
++    lenient = score_rswa(rem_epochs, nrem_epochs, threshold_multiplier=1.5)
++    strict = score_rswa(rem_epochs, nrem_epochs, threshold_multiplier=5.0)
++
++    # Wyższy próg -> mniej (albo tyle samo) epok oznaczonych jako atonia_lost
++    assert strict.rswa_index <= lenient.rswa_index

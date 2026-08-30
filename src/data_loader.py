@@ -1,4 +1,12 @@
-
+"""
+UWAGA (2026-08-28): TEN plik to niedotknięty stub z Fazy 0. Prawdziwa,
+działająca implementacja loadera CAP jest teraz w `src/data/cap_loader.py`
+(CAPSleepDataset), napisana niezależnie i już realnie testowana na
+pobranym zbiorze. Trzymanie dwóch loaderów obok siebie to prosta droga do
+sytuacji "który jest aktualny?" za tydzień -- polecam usunąć ten plik (i
+src/dataset.py, jeśli nic go jeszcze nie importuje) albo jasno oznaczyć
+jako martwy kod, zamiast rozwijać oba równolegle.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass

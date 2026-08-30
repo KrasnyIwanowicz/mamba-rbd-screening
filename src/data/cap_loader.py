@@ -1,9 +1,15 @@
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import warnings
 import mne
 import numpy as np
 import pandas as pd
+
+# Kotwiczymy parser na jednym, stałoformatowym tokenie -- czasie hh:mm:ss --
+# zamiast dzielić linię po białych znakach. Patrz uzasadnienie w docstringu
+# parse_txt_annotations() poniżej.
+_TIME_RE = re.compile(r"\b\d{2}:\d{2}:\d{2}\b")
 
 
 @dataclass
@@ -36,32 +42,79 @@ class CAPSleepDataset:
         self.epoch_samples = target_fs * epoch_len_sec
 
     def parse_txt_annotations(self, txt_path: Path) -> pd.DataFrame:
-        """Parsuje plik tekstowy adnotacji stadiów snu z CAP."""
-        records = []
+        """Parsuje plik tekstowy adnotacji stadiów snu z CAP (REMlogic export).
+
+        POPRAWKA (2026-08-28): poprzednia wersja dzieliła linię przez
+        `re.split(r"\\s+", line)` i zakładała, że parts[2] to Duration.
+        Realny format wiersza to:
+            Stage \\t Position \\t Time[hh:mm:ss] \\t Event \\t Duration[s] \\t Location
+        Pole Position może zawierać spację ("Unknown Position"), a NAWET
+        gdy jest jednym słowem ("Left"), parts[2] to i tak Time, nie
+        Duration. W obu przypadkach `float(parts[2])` rzuca ValueError na
+        KAŻDYM wierszu -> df_stages wychodziło puste dla każdego pacjenta,
+        a load_subject() cicho zwracało [] bez żadnego błędu. Sprawdzone
+        na realnym rbd1.txt z physionet.org.
+
+        Nowe podejście: kotwiczymy się na jedynym stałoformatowym tokenie w
+        wierszu -- czasie hh:mm:ss. Wszystko przed nim to Stage+Position
+        (Position może mieć spację), wszystko po nim to Event, Duration,
+        Location -- te trzy pola NIE mają spacji, więc zwykły split() już
+        działa bezpiecznie.
+
+        Dodatkowo plik miesza wiersze makrostruktury (Event zaczyna się od
+        "SLEEP-", Duration==30, jedna epoka na wiersz) z wierszami CAP
+        mikrostruktury (Event zaczyna się od "MCAP-A1/A2/A3", zmienny czas
+        trwania, mogą wypadać W TEJ SAMEJ epoce co wiersz SLEEP-*). Bez
+        filtrowania po prefiksie "SLEEP-" te dodatkowe wiersze zostałyby
+        policzone jako osobne "epoki" i zepsuły wyrównanie index-do-index
+        z oknami wyciętymi z sygnału w load_subject().
+        """
         with open(txt_path, "r", encoding="latin-1") as f:
-            lines = f.readlines()
+            lines = f.read().splitlines()
 
-        start_reading = False
-        for line in lines:
+        header_idx = next((i for i, l in enumerate(lines) if "Sleep Stage" in l), None)
+        if header_idx is None:
+            warnings.warn(f"{txt_path.name}: nie znaleziono nagłówka 'Sleep Stage' -- zwracam pustą ramkę.")
+            return pd.DataFrame(columns=["stage", "duration", "time"])
+
+        records = []
+        for line in lines[header_idx + 1 :]:
             line = line.strip()
-            if "Sleep Stage" in line or "STAGE" in line:
-                start_reading = True
-                continue
-            if not start_reading or not line:
+            if not line:
                 continue
 
-            parts = re.split(r"\s+", line)
-            # Format w CAP to zazwyczaj: [Sleep Stage, Time [hh:mm:ss], Duration[s], Position...]
-            if len(parts) >= 3:
-                stage_raw = parts[0]
-                stage_norm = self.STAGE_MAP.get(stage_raw, "UNKNOWN")
-                try:
-                    duration = float(parts[2])
-                    records.append({"stage": stage_norm, "duration": duration})
-                except ValueError:
-                    continue
+            m = _TIME_RE.search(line)
+            if not m:
+                continue
 
-        return pd.DataFrame(records)
+            before = line[: m.start()].strip()
+            after = line[m.end() :].strip()
+
+            before_parts = before.split(None, 1)
+            if not before_parts:
+                continue
+            stage_raw = before_parts[0]
+
+            after_parts = after.split()
+            if len(after_parts) < 3:
+                continue
+            event, duration_str, _location = after_parts[0], after_parts[1], after_parts[2]
+
+            if not event.startswith("SLEEP-"):
+                continue  # pomijamy zdarzenia CAP (MCAP-A1/A2/A3) -- to nie są 30s epoki
+
+            try:
+                duration = float(duration_str)
+            except ValueError:
+                continue
+
+            stage_norm = self.STAGE_MAP.get(stage_raw, "UNKNOWN")
+            if stage_norm == "UNKNOWN":
+                warnings.warn(f"{txt_path.name}: nieznana etykieta stadium '{stage_raw}' w wierszu: {line!r}")
+
+            records.append({"stage": stage_norm, "duration": duration, "time": m.group(0)})
+
+        return pd.DataFrame(records, columns=["stage", "duration", "time"])
 
     def load_subject(self, subject_id: str, rem_only: bool = True) -> list[EpochRecord]:
         """Wczytuje sygnały EMG/EEG i adnotacje dla danego pacjenta."""
@@ -95,6 +148,13 @@ class CAPSleepDataset:
         # Jeśli są adnotacje .txt
         if txt_path.exists():
             df_stages = self.parse_txt_annotations(txt_path)
+            if len(df_stages) == 0:
+                warnings.warn(
+                    f"[!] {subject_id}: 0 epok stadium wczytanych z {txt_path.name} -- "
+                    f"to prawie na pewno błąd parsera, nie brak danych. Sprawdź plik ręcznie "
+                    f"przed zaufaniem pustemu wynikowi."
+                )
+                return []
             for i in range(min(total_epochs, len(df_stages))):
                 stage = df_stages.iloc[i]["stage"]
                 if rem_only and stage != "REM":

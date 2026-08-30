@@ -1,6 +1,7 @@
 numpy
 scipy
 pandas
+tqdm             # używane w scripts/download_cap.py i scripts/audit_cap_channels.py
 scikit-learn
 torch>=2.0
 mne              # EDF/PSG parsing, same as parkinsons-eeg-classifier
