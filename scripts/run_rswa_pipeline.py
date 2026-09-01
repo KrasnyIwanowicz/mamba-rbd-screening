@@ -1,24 +1,11 @@
-"""
-Laczy CAPSleepLoader (src/data/cap_loader.py) z rule-based scoringiem
-(src/rswa_scoring.py) w jeden przebieg: dla kazdego pacjenta z grup "rbd"
-i "n" liczy rswa_index i zapisuje do reports/rswa_scores.csv.
-
-WAZNE: load_subject(stages_filter=None) (domyslne) zwraca WSZYSTKIE epoki
--- bo score_rswa() potrzebuje zarowno epok REM jak i N2/N3 (linia bazowa).
-Ten skrypt sam dzieli wynik na REM / N2+N3, nie polega na filtrowaniu przez
-loader.
-
-Nie uruchamialam tego na prawdziwych danych -- nie mam lokalnie pobranego
-CAP Sleep Database. Logika orchestracji jest przetestowana na fikcyjnym
-loaderze w tests/test_run_rswa_pipeline.py, ale realne liczby (ile
-pacjentow ma wykryty kanal EMG, jaki rswa_index wychodzi) poznamy dopiero
-gdy odpalisz to lokalnie.
-"""
 from __future__ import annotations
-
+import sys
+from pathlib import Path
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 import csv
 import warnings
-from pathlib import Path
 
 from src.data.cap_loader import CAPSleepLoader
 from src.rswa_scoring import score_rswa
@@ -27,13 +14,6 @@ NREM_STAGES = {"N2", "N3"}
 
 
 def compute_subject_rswa(loader: CAPSleepLoader, subject_id: str) -> dict:
-    """
-    Zwraca dict z wynikiem dla jednego pacjenta, albo z powodem pominiecia
-    (skipped_reason), zamiast rzucac wyjatek -- zeby jeden zepsuty plik nie
-    przerywal przebiegu po wszystkich pacjentach. CAPSleepLoader.load_subject
-    rzuca FileNotFoundError (brak pliku) albo ValueError (brak kanalu EMG) --
-    oba lapiemy tutaj.
-    """
     try:
         epochs = loader.load_subject(subject_id, stages_filter=None)
     except (FileNotFoundError, ValueError) as e:
@@ -104,11 +84,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", default="reports/rswa_scores.csv")
     args = parser.parse_args()
 
-    # Lista pacjentow -- na razie z gory znana liczba wg strony CAP Sleep
-    # Database (rbd1..22, n1..16). Jesli Twoj lokalny download jest
-    # niekompletny, load_subject po prostu zglosi FileNotFoundError dla
-    # brakujacych i skrypt pojdzie dalej -- zobaczysz to w kolumnie
-    # skipped_reason w CSV.
     group_counts = {"rbd": 22, "n": 16}
     subject_ids = [
         f"{g}{i}" for g in args.groups if g in group_counts for i in range(1, group_counts[g] + 1)
