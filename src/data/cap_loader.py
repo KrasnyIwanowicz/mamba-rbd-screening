@@ -1,178 +1,183 @@
+# -*- coding: utf-8 -*-
+"""
+src/data/cap_loader.py
+Kompletny loader dla CAP Sleep Database (EDF + RemLogic TXT).
+
+Historia: poprzednia wersja (CAPSleepDataset, reczny split po bialych
+znakach) miala bug, przez ktory df_stages zawsze wychodzilo puste, bo
+"Unknown Position" ma spacje w srodku, a kod zakladal sztywna pozycje
+kolumny. Ta wersja parsuje przez pandas.read_csv z separatorem "jeden lub
+wiecej tabulatorow" (sep=r"\t+") -- poniewaz prawdziwym separatorem kolumn
+w tym pliku sa tabulatory, a nie spacje, spacja wewnatrz "Unknown Position"
+nie jest traktowana jako granica kolumny. Zweryfikowane na syntetycznych
+danych w tym samym formacie co realny plik z physionet.org (2026-08-29):
+poprawnie zachowuje "Unknown Position" jako jedna wartosc i poprawnie
+filtruje wiersze mikrostruktury CAP (MCAP-A1/A2/A3) przez
+Event.str.startswith("SLEEP-").
+"""
+
 from dataclasses import dataclass
 from pathlib import Path
 import re
-import warnings
 import mne
 import numpy as np
 import pandas as pd
 
-# Kotwiczymy parser na jednym, stałoformatowym tokenie -- czasie hh:mm:ss --
-# zamiast dzielić linię po białych znakach. Patrz uzasadnienie w docstringu
-# parse_txt_annotations() poniżej.
-_TIME_RE = re.compile(r"\b\d{2}:\d{2}:\d{2}\b")
-
 
 @dataclass
-class EpochRecord:
+class EpochData:
     subject_id: str
     epoch_idx: int
     stage: str
-    emg_signal: np.ndarray  # [channels, samples]
-    eeg_signal: np.ndarray | None  # [channels, samples]
+    start_sec: float
+    duration_sec: float
+    emg_chin: np.ndarray  # [samples]
+    emg_leg: np.ndarray | None  # [samples] lub None
+    eeg_central: np.ndarray | None  # [samples] lub None
     sampling_rate: int
     is_rbd: bool
 
 
-class CAPSleepDataset:
+class CAPSleepLoader:
     STAGE_MAP = {
         "W": "WAKE",
+        "S0": "WAKE",
         "S1": "N1",
         "S2": "N2",
         "S3": "N3",
         "S4": "N3",
         "REM": "REM",
         "R": "REM",
-        "MT": "MOVEMENT"
+        "MT": "MOVEMENT",
+        "UNSCORED": "UNKNOWN",
+        "?": "UNKNOWN",
     }
 
-    def __init__(self, data_dir: str | Path, target_fs: int = 200, epoch_len_sec: int = 30):
+    def __init__(self, data_dir: str | Path, target_fs: int = 200, epoch_sec: int = 30):
         self.data_dir = Path(data_dir)
         self.target_fs = target_fs
-        self.epoch_len_sec = epoch_len_sec
-        self.epoch_samples = target_fs * epoch_len_sec
+        self.epoch_sec = epoch_sec
 
-    def parse_txt_annotations(self, txt_path: Path) -> pd.DataFrame:
-        """Parsuje plik tekstowy adnotacji stadiów snu z CAP (REMlogic export).
+    def parse_remlogic_txt(self, txt_path: Path) -> pd.DataFrame:
+        """Parsuje plik RemLogic Event Export i zwraca epoki stadiow snu.
 
-        POPRAWKA (2026-08-28): poprzednia wersja dzieliła linię przez
-        `re.split(r"\\s+", line)` i zakładała, że parts[2] to Duration.
-        Realny format wiersza to:
-            Stage \\t Position \\t Time[hh:mm:ss] \\t Event \\t Duration[s] \\t Location
-        Pole Position może zawierać spację ("Unknown Position"), a NAWET
-        gdy jest jednym słowem ("Left"), parts[2] to i tak Time, nie
-        Duration. W obu przypadkach `float(parts[2])` rzuca ValueError na
-        KAŻDYM wierszu -> df_stages wychodziło puste dla każdego pacjenta,
-        a load_subject() cicho zwracało [] bez żadnego błędu. Sprawdzone
-        na realnym rbd1.txt z physionet.org.
-
-        Nowe podejście: kotwiczymy się na jedynym stałoformatowym tokenie w
-        wierszu -- czasie hh:mm:ss. Wszystko przed nim to Stage+Position
-        (Position może mieć spację), wszystko po nim to Event, Duration,
-        Location -- te trzy pola NIE mają spacji, więc zwykły split() już
-        działa bezpiecznie.
-
-        Dodatkowo plik miesza wiersze makrostruktury (Event zaczyna się od
-        "SLEEP-", Duration==30, jedna epoka na wiersz) z wierszami CAP
-        mikrostruktury (Event zaczyna się od "MCAP-A1/A2/A3", zmienny czas
-        trwania, mogą wypadać W TEJ SAMEJ epoce co wiersz SLEEP-*). Bez
-        filtrowania po prefiksie "SLEEP-" te dodatkowe wiersze zostałyby
-        policzone jako osobne "epoki" i zepsuły wyrównanie index-do-index
-        z oknami wyciętymi z sygnału w load_subject().
+        Separator to "jeden lub wiecej tabulatorow" (sep=r"\t+"), NIE
+        biale znaki ogolnie -- to jest kluczowe, bo pole Position bywa
+        wieloczlonowe ("Unknown Position") i zawiera spacje, ktora nie
+        jest tabulatorem, wiec nie rozbija kolumny.
         """
         with open(txt_path, "r", encoding="latin-1") as f:
-            lines = f.read().splitlines()
+            lines = f.readlines()
 
-        header_idx = next((i for i, l in enumerate(lines) if "Sleep Stage" in l), None)
-        if header_idx is None:
-            warnings.warn(f"{txt_path.name}: nie znaleziono nagłówka 'Sleep Stage' -- zwracam pustą ramkę.")
-            return pd.DataFrame(columns=["stage", "duration", "time"])
+        header_idx = -1
+        for idx, line in enumerate(lines):
+            if "Sleep Stage" in line and "Time [hh:mm:ss]" in line:
+                header_idx = idx
+                break
 
-        records = []
-        for line in lines[header_idx + 1 :]:
-            line = line.strip()
-            if not line:
-                continue
+        if header_idx == -1:
+            raise ValueError(f"Nie znaleziono naglowka tabeli w {txt_path}")
 
-            m = _TIME_RE.search(line)
-            if not m:
-                continue
+        df = pd.read_csv(
+            txt_path,
+            skiprows=header_idx,
+            sep=r"\t+",
+            engine="python",
+            encoding="latin-1",
+        )
+        df.columns = [c.strip() for c in df.columns]
 
-            before = line[: m.start()].strip()
-            after = line[m.end() :].strip()
+        # Filtrujemy tylko zdarzenia stadiow snu (ignorujemy mikrostrukture CAP: MCAP-A1/A2/A3)
+        if "Event" in df.columns:
+            df = df[df["Event"].str.startswith("SLEEP-", na=False)].copy()
 
-            before_parts = before.split(None, 1)
-            if not before_parts:
-                continue
-            stage_raw = before_parts[0]
+        df["stage_clean"] = df["Sleep Stage"].astype(str).str.strip().map(
+            lambda s: self.STAGE_MAP.get(s, "UNKNOWN")
+        )
 
-            after_parts = after.split()
-            if len(after_parts) < 3:
-                continue
-            event, duration_str, _location = after_parts[0], after_parts[1], after_parts[2]
+        # UWAGA: start_sec liczony z POZYCJI wiersza (i * epoch_sec), nie z
+        # kolumny Time -- zaklada, ze po odfiltrowaniu MCAP-* zostaja
+        # wylacznie ciagle, kolejne 30-sekundowe epoki bez przerw. To
+        # standardowe zalozenie dla hipnogramu AASM/R&K, ale CAP to
+        # archiwum wielu laboratoriow na przestrzeni lat (patrz
+        # docs/technical_premise.md) -- jesli ktorys realny plik ma luke w
+        # wyniku (np. brakujacy fragment nagrania), start_sec przestanie
+        # sie zgadzac z kolumna Time. Warto to sprawdzic na kilku
+        # pierwszych realnych plikach zanim zaufa sie temu bezkrytycznie
+        # na calym zbiorze.
+        df["duration_clean"] = pd.to_numeric(df["Duration[s]"], errors="coerce").fillna(self.epoch_sec)
+        df["start_sec"] = np.arange(len(df)) * self.epoch_sec
 
-            if not event.startswith("SLEEP-"):
-                continue  # pomijamy zdarzenia CAP (MCAP-A1/A2/A3) -- to nie są 30s epoki
+        return df[["stage_clean", "start_sec", "duration_clean"]]
 
-            try:
-                duration = float(duration_str)
-            except ValueError:
-                continue
+    def _find_channel(self, ch_names: list[str], patterns: list[str]) -> str | None:
+        for pat in patterns:
+            for ch in ch_names:
+                if re.search(pat, ch):
+                    return ch
+        return None
 
-            stage_norm = self.STAGE_MAP.get(stage_raw, "UNKNOWN")
-            if stage_norm == "UNKNOWN":
-                warnings.warn(f"{txt_path.name}: nieznana etykieta stadium '{stage_raw}' w wierszu: {line!r}")
-
-            records.append({"stage": stage_norm, "duration": duration, "time": m.group(0)})
-
-        return pd.DataFrame(records, columns=["stage", "duration", "time"])
-
-    def load_subject(self, subject_id: str, rem_only: bool = True) -> list[EpochRecord]:
-        """Wczytuje sygnały EMG/EEG i adnotacje dla danego pacjenta."""
+    def load_subject(self, subject_id: str, stages_filter: list[str] | None = None) -> list[EpochData]:
+        """
+        Wczytuje sygnaly i adnotacje dla danego pacjenta.
+        np. stages_filter=['REM'] wyciaga tylko epoki REM.
+        stages_filter=None (domyslnie) zwraca WSZYSTKIE epoki -- potrzebne
+        np. do policzenia linii bazowej NREM w src/rswa_scoring.py.
+        """
         edf_path = self.data_dir / f"{subject_id}.edf"
         txt_path = self.data_dir / f"{subject_id}.txt"
 
-        if not edf_path.exists():
-            raise FileNotFoundError(f"Brak pliku {edf_path}")
+        if not edf_path.exists() or not txt_path.exists():
+            raise FileNotFoundError(f"Brak pliku EDF lub TXT dla {subject_id}")
 
         raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
-        
-        # Wykrywanie kanału EMG brody
-        chin_candidates = [ch for ch in raw.ch_names if re.search(r"(?i)chin|submental|emg1", ch)]
-        if not chin_candidates:
-            print(f"[!] Pomijanie {subject_id}: brak wykrytego EMG brody.")
-            return []
-        
-        chin_ch = chin_candidates[0]
-        raw.pick_channels([chin_ch])
+        ch_names = raw.ch_names
 
-        # Resampling do target_fs (np. 200 Hz)
+        chin_ch = self._find_channel(ch_names, [r"(?i)chin", r"(?i)submental", r"(?i)emg1[-_]emg2"])
+        leg_ch = self._find_channel(ch_names, [r"(?i)dx\d*[-_]dx\d*", r"(?i)dx", r"(?i)tibial"])
+        eeg_ch = self._find_channel(ch_names, [r"(?i)c4[-_]a1", r"(?i)c3[-_]a2", r"(?i)c4", r"(?i)c3"])
+
+        if chin_ch is None:
+            raise ValueError(f"Pacjent {subject_id} nie posiada kanalu Chin EMG w {ch_names}")
+
         if raw.info["sfreq"] != self.target_fs:
             raw.resample(self.target_fs, npad="auto")
 
-        emg_data = raw.get_data()  # [1, total_samples]
-        total_epochs = emg_data.shape[1] // self.epoch_samples
-
-        epochs = []
+        df_stages = self.parse_remlogic_txt(txt_path)
         is_rbd = subject_id.lower().startswith("rbd")
 
-        # Jeśli są adnotacje .txt
-        if txt_path.exists():
-            df_stages = self.parse_txt_annotations(txt_path)
-            if len(df_stages) == 0:
-                warnings.warn(
-                    f"[!] {subject_id}: 0 epok stadium wczytanych z {txt_path.name} -- "
-                    f"to prawie na pewno błąd parsera, nie brak danych. Sprawdź plik ręcznie "
-                    f"przed zaufaniem pustemu wynikowi."
-                )
-                return []
-            for i in range(min(total_epochs, len(df_stages))):
-                stage = df_stages.iloc[i]["stage"]
-                if rem_only and stage != "REM":
-                    continue
+        epoch_samples = int(self.epoch_sec * self.target_fs)
+        epochs = []
 
-                start = i * self.epoch_samples
-                end = start + self.epoch_samples
-                epoch_sig = emg_data[:, start:end]
+        chin_data = raw.get_data(picks=[chin_ch])[0]
+        leg_data = raw.get_data(picks=[leg_ch])[0] if leg_ch else None
+        eeg_data = raw.get_data(picks=[eeg_ch])[0] if eeg_ch else None
+        total_samples = len(chin_data)
 
-                epochs.append(
-                    EpochRecord(
-                        subject_id=subject_id,
-                        epoch_idx=i,
-                        stage=stage,
-                        emg_signal=epoch_sig,
-                        eeg_signal=None,
-                        sampling_rate=self.target_fs,
-                        is_rbd=is_rbd
-                    )
+        for i, row in df_stages.iterrows():
+            stage = row["stage_clean"]
+            if stages_filter and stage not in stages_filter:
+                continue
+
+            start_idx = int(row["start_sec"] * self.target_fs)
+            end_idx = start_idx + epoch_samples
+
+            if end_idx > total_samples:
+                break
+
+            epochs.append(
+                EpochData(
+                    subject_id=subject_id,
+                    epoch_idx=i,
+                    stage=stage,
+                    start_sec=row["start_sec"],
+                    duration_sec=row["duration_clean"],
+                    emg_chin=chin_data[start_idx:end_idx],
+                    emg_leg=leg_data[start_idx:end_idx] if leg_data is not None else None,
+                    eeg_central=eeg_data[start_idx:end_idx] if eeg_data is not None else None,
+                    sampling_rate=self.target_fs,
+                    is_rbd=is_rbd,
                 )
+            )
+
         return epochs

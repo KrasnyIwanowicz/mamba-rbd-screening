@@ -1,0 +1,2 @@
+subject_id,cohort,duration_h,base_sfreq,total_channels,has_staging_txt,chin_emg_ch,leg_emg_ch,eeg_central_ch,eeg_occipital_ch,eog_ch,all_channels
+rbd1,RBD,4.58,512.0,15,True,EMG1-EMG2,,C4-A1,P4-O2,ROC-LOC,ROC-LOC; Fp2-F4; F4-C4; C4-P4; P4-O2; C4-A1; EMG1-EMG2; ECG1-ECG2; DX1-DX2; SX1-SX2; F8-T4; F7-T3; TORACE; ADDOME; MIC

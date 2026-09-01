@@ -6,13 +6,25 @@ from tqdm import tqdm
 
 # Mapowanie reguł dla kluczowych kanałów
 CHANNEL_PATTERNS = {
-    "EMG_CHIN": [r"(?i)emg.*chin", r"(?i)chin.*emg", r"(?i)chin\d*[-_]chin\d*", r"(?i)submental", r"(?i)emg1[-_]emg2"],
-    "EMG_LEG": [r"(?i)tibial", r"(?i)leg", r"(?i)dx\d*[-_]sn\d*", r"(?i)rat[-_]lat", r"(?i)emg.*leg"],
-    "EEG_CENTRAL": [r"(?i)c4[-_]a1", r"(?i)c3[-_]a2", r"(?i)c4[-_]m1", r"(?i)c3[-_]m2", r"(?i)c4", r"(?i)c3"],
-    "EEG_OCCIPITAL": [r"(?i)o2[-_]a1", r"(?i)o1[-_]a2", r"(?i)o2[-_]m1", r"(?i)o1[-_]m2", r"(?i)o2", r"(?i)o1"],
-    "EOG": [r"(?i)eog", r"(?i)roc[-_]loc", r"(?i)e1[-_]m2", r"(?i)e2[-_]m2"]
+    "EMG_CHIN": [
+        r"(?i)emg.*chin", r"(?i)chin.*emg", r"(?i)chin\d*[-_]chin\d*", 
+        r"(?i)submental", r"(?i)emg1[-_]emg2"
+    ],
+    "EMG_LEG": [
+        r"(?i)tibial", r"(?i)leg", r"(?i)dx\d*[-_]dx\d*", r"(?i)sx\d*[-_]sx\d*", 
+        r"(?i)dx\d*[-_]sn\d*", r"(?i)rat[-_]lat", r"(?i)emg.*leg", r"(?i)dx", r"(?i)sx"
+    ],
+    "EEG_CENTRAL": [
+        r"(?i)c4[-_]a1", r"(?i)c3[-_]a2", r"(?i)c4[-_]m1", r"(?i)c3[-_]m2", 
+        r"(?i)c4[-_]p4", r"(?i)c4", r"(?i)c3"
+    ],
+    "EEG_OCCIPITAL": [
+        r"(?i)o2[-_]a1", r"(?i)o1[-_]a2", r"(?i)p4[-_]o2", r"(?i)o2", r"(?i)o1"
+    ],
+    "EOG": [
+        r"(?i)roc[-_]loc", r"(?i)eog", r"(?i)e1[-_]m2", r"(?i)e2[-_]m2"
+    ]
 }
-
 
 def find_matching_channel(ch_names: list[str], patterns: list[str]) -> str | None:
     for pat in patterns:
