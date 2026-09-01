@@ -91,6 +91,22 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Diagnostyka kanału EMG
+
+Przed interpretacją wyniku RSWA sprawdź, który kanał EDF został wybrany jako
+EMG brody i czy surowy RMS w REM w ogóle rozdziela się od NREM:
+
+```bash
+python scripts/diagnose_subject.py rbd1 --data-dir data/raw/capslpdb
+```
+
+Skrypt wypisuje pełną listę kanałów, wybór loadera i statystyki RMS przed
+progowaniem. Alias w rodzaju `EMG1-EMG2` **nie potwierdza sam w sobie**, że
+jest to EMG podbródkowe; trzeba zweryfikować montaż w dokumentacji konkretnego
+zapisu. Brak epok REM ponad nawet łagodniejszym progiem oznacza, że obecny
+baseline RMS nie dostarcza sygnału do rozdzielania tej nocy — nie że należy
+automatycznie obniżyć próg albo że kanał jest potwierdzony.
+
 ## Status
 
 🔲 Phase 0 (this scaffold) — repo structure, honest premise doc, config, stubs.
