@@ -107,6 +107,18 @@ zapisu. Brak epok REM ponad nawet łagodniejszym progiem oznacza, że obecny
 baseline RMS nie dostarcza sygnału do rozdzielania tej nocy — nie że należy
 automatycznie obniżyć próg albo że kanał jest potwierdzony.
 
+### Brakujący plik hipnogramu
+
+Pobierz lub sprawdź pojedynczy plik bez pobierania całej bazy:
+
+```bash
+python scripts/download_cap.py --subjects n1 --extensions .txt --data-dir data/raw/capslpdb
+```
+
+Skrypt kończy się błędem i wypisuje brakujący plik, jeśli źródło nie udostępnia
+go pod oczekiwaną nazwą. Rekord bez odpowiadającego `.txt` nie może zostać
+użyty do analizy REM/RSWA.
+
 ## Status
 
 🔲 Phase 0 (this scaffold) — repo structure, honest premise doc, config, stubs.
