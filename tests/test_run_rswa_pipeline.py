@@ -10,10 +10,15 @@ from scripts.run_rswa_pipeline import compute_subject_rswa, run
 
 
 class _FakeEpoch:
-    def __init__(self, stage, emg_chin, is_rbd):
+    _next_start = 0.0
+
+    def __init__(self, stage, emg_chin, is_rbd, sampling_rate=100):
         self.stage = stage
         self.emg_chin = emg_chin
         self.is_rbd = is_rbd
+        self.sampling_rate = sampling_rate
+        self.start_sec = _FakeEpoch._next_start
+        _FakeEpoch._next_start += len(emg_chin) / sampling_rate
 
 
 class _FakeLoader:
@@ -29,11 +34,11 @@ class _FakeLoader:
         return result
 
 
-def _quiet(seed=0, n=100):
+def _quiet(seed=0, n=3000):  # 30 s @ 100 Hz
     return np.random.default_rng(seed).normal(0, 0.05, size=n)
 
 
-def _active(seed=0, n=100):
+def _active(seed=0, n=3000):
     return np.random.default_rng(seed).normal(0, 1.0, size=n)
 
 
@@ -54,6 +59,8 @@ def test_compute_subject_rswa_splits_rem_and_nrem_correctly():
     assert result["n_rem_epochs"] == 2
     assert result["n_nrem_epochs"] == 2  # N2 + N3, WAKE wykluczone
     assert 0.0 <= result["rswa_index"] <= 1.0
+    assert 0.0 <= result["rswa_mini_index"] <= 1.0
+    assert "rem_atonia_index" in result
 
 
 def test_compute_subject_rswa_skips_when_no_nrem_epochs():
@@ -109,7 +116,7 @@ def test_run_writes_csv_with_mixed_success_and_skips(tmp_path, monkeypatch):
         _FakeEpoch("REM", _quiet(1), is_rbd=True),
     ]
     fake_loader = _FakeLoader({"rbd1": good_epochs, "n1": []})
-    monkeypatch.setattr(mod, "CAPSleepLoader", lambda data_dir: fake_loader)
+    monkeypatch.setattr(mod, "CAPSleepLoader", lambda data_dir, **kwargs: fake_loader)
 
     output_csv = tmp_path / "reports" / "rswa_scores.csv"
     rows = run(data_dir="unused", subject_ids=["rbd1", "n1"], output_csv=output_csv)
@@ -119,3 +126,11 @@ def test_run_writes_csv_with_mixed_success_and_skips(tmp_path, monkeypatch):
     content = output_csv.read_text(encoding="utf-8")
     assert "rbd1" in content
     assert "n1" in content
+    assert "rswa_mini_index" in content.splitlines()[0]
+
+
+def test_group_is_parsed_not_guessed_from_first_letter():
+    # nfle* (padaczka) zaczyna sie na "n", ale NIE jest grupa kontrolna.
+    epochs = [_FakeEpoch("N2", _quiet(0), is_rbd=False), _FakeEpoch("REM", _quiet(1), is_rbd=False)]
+    result = compute_subject_rswa(_FakeLoader({"nfle3": epochs}), "nfle3")
+    assert result["group"] == "nfle"

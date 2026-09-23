@@ -34,10 +34,46 @@ Update this file, don't quietly let the README drift from it.
   can validate.
 - **The `.txt` annotation parser had a silent, universal bug** (see
   PATCH_NOTES.md) that made `parse_txt_annotations` return zero rows for
-  every subject, regardless of the Position field's format. Fixed by
-  anchoring the split on the one fixed-format token (the hh:mm:ss time)
-  instead of a naive whitespace split. Covered by
-  `tests/test_cap_loader.py` now, specifically to catch a regression.
+  every subject, regardless of the Position field's format. The current
+  loader (`src/data/cap_loader.py`) parses with a tab separator
+  (`sep=r"\t+"`), so the space inside "Unknown Position" no longer splits a
+  column. (PATCH_NOTES.md describes an earlier regex-based fix that was later
+  replaced.) Covered by `tests/test_cap_loader.py`.
+
+## Corrected 2026-09-23
+
+- **Epoch onsets were computed from the row index, not from time.** The
+  loader set `start_sec = i * 30`, which silently assumes the hypnogram starts
+  at the exact EDF start time and has no scoring gaps. If either assumption
+  fails, every epoch is shifted and "REM" is cut from a different stage.
+  Onsets now come from the `Time [hh:mm:ss]` column relative to the EDF
+  header start time (midnight crossings and gaps handled; warnings when
+  they occur). `scripts/audit_cap_channels.py` now reports the offset, gap
+  count and overrun per subject. **How many CAP records actually had an
+  offset is not yet known** — the audit has only been run on rbd1.
+- **`rswa_index = 0.0` for rbd1 is largely a property of the rule, not proof of
+  bad data.** "Whole 30-s REM epoch RMS > 2x median NREM RMS" is nearly blind to
+  RSWA: chin tone is physiologically *lower* in REM than in NREM, phasic bursts
+  (0.1–5 s) are averaged away over 30 s, and raw RMS (no 10–100 Hz band)
+  also measures drift and ECG. `tests/test_rswa_scoring.py` reproduces exactly
+  this: RBD-like phasic bursts give `rswa_index == 0` but a clearly non-zero
+  mini-epoch index. Added: 3-s mini-epoch activity vs. the REM atonic floor
+  (SINBAR-inspired, *not* visual SINBAR scoring) and the REM Atonia Index
+  (Ferri 2008/2010). Decision thresholds are chosen under LOSO
+  (`src/evaluate.py`), never copied from papers that used other hardware.
+  Whether any of these separates rbd from n on real CAP data is still open.
+- **The sleep-stager checkpoint expects raw volts, not normalized EEG.**
+  The submodule's `data_loader.py` never calls its own `preprocessing.py`
+  (bandpass/z-score are dead code there), so the Sleep-EDF model was trained
+  on unfiltered Fpz-Cz in volts at 100 Hz. `src/staging/cap_stager.py`
+  feeds CAP EEG the same way; amplitude/derivation differences between CAP
+  labs and Sleep-EDF are part of the domain shift Phase 2 has to measure.
+- **Label unit decided (Phase 1):** the only ground truth in CAP is the
+  subject-level diagnosis (22 rbd, 16 n). Per-epoch RSWA values are rule-derived
+  *measurements*, not labels. The Mamba classifier in `src/models/mamba_rbd.py`
+  is trained on the subject label copied to each REM epoch, so it learns
+  "epoch comes from an RBD patient", and it is evaluated only at subject
+  level with patient-grouped CV.
 
 ## Hypothesis - to be tested
 

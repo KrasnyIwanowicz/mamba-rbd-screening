@@ -94,3 +94,96 @@ def test_stage_map_covers_all_r_and_k_codes():
     # etapie mapowania -- to test wykrywa braki w samej mapie.
     expected_raw_codes = {"W", "S0", "S1", "S2", "S3", "S4", "REM", "R", "MT"}
     assert expected_raw_codes <= set(CAPSleepLoader.STAGE_MAP.keys())
+
+
+# ---------------------------------------------------------------------------
+# Wyrownanie hipnogramu do sygnalu (poprawka 2026-09-23): start epoki z kolumny
+# Time wzgledem startu EDF, nie z numeru wiersza.
+# ---------------------------------------------------------------------------
+import datetime
+import warnings
+
+import numpy as np
+
+from src.data.cap_loader import subject_group
+
+_HEADER = SYNTHETIC_TXT.split("Sleep Stage\t")[0] + "Sleep Stage\tPosition\tTime [hh:mm:ss]\tEvent\tDuration[s]\tLocation\n"
+
+
+def _txt(rows: list[tuple[str, str]]) -> str:
+    event = {"W": "SLEEP-S0", "S2": "SLEEP-S2", "S3": "SLEEP-S3", "R": "SLEEP-REM"}
+    return _HEADER + "".join(f"{st}\tSupine\t{t}\t{event[st]}\t30\tROC-LOC\n" for st, t in rows)
+
+
+def test_onsets_follow_time_column_across_gap_and_midnight(tmp_path):
+    p = tmp_path / "rbd9.txt"
+    p.write_text(_txt([("S2", "23:59:00"), ("R", "23:59:30"), ("R", "00:00:00"), ("S2", "00:01:00")]), encoding="latin-1")
+    loader = CAPSleepLoader(tmp_path)
+    with pytest.warns(UserWarning, match="odstepow"):
+        df = loader.parse_remlogic_txt(p, recording_start=datetime.time(23, 58, 0))
+    # 60 s po starcie EDF; przez polnoc +30 s; luka 00:00:30 pominieta.
+    assert df["start_sec"].tolist() == [60.0, 90.0, 120.0, 180.0]
+
+
+def test_onsets_without_recording_start_are_relative_to_first_epoch(tmp_path):
+    p = tmp_path / "n9.txt"
+    p.write_text(_txt([("W", "22:10:00"), ("S2", "22:10:30")]), encoding="latin-1")
+    df = CAPSleepLoader(tmp_path).parse_remlogic_txt(p)
+    assert df["start_sec"].tolist() == [0.0, 30.0]
+
+
+def test_hypnogram_starting_before_edf_gives_negative_onset(tmp_path):
+    p = tmp_path / "n9.txt"
+    p.write_text(_txt([("W", "21:59:30"), ("S2", "22:00:00")]), encoding="latin-1")
+    df = CAPSleepLoader(tmp_path).parse_remlogic_txt(p, recording_start=datetime.time(22, 0, 0))
+    assert df["start_sec"].tolist() == [-30.0, 0.0]
+
+
+@pytest.mark.parametrize(
+    "subject_id,group",
+    [("rbd1", "rbd"), ("n16", "n"), ("nfle3", "nfle"), ("narco2", "narco"), ("RBD4", "rbd")],
+)
+def test_subject_group_does_not_confuse_prefixes(subject_id, group):
+    assert subject_group(subject_id) == group
+
+
+def test_subject_group_rejects_unknown_ids():
+    with pytest.raises(ValueError):
+        subject_group("patient7")
+
+
+def _write_edf(path: Path, start: datetime.datetime, chin_volts: np.ndarray, fs: int):
+    pyedflib = pytest.importorskip("pyedflib")
+    eeg = np.random.default_rng(1).normal(0, 1e-5, len(chin_volts))
+    header = dict(dimension="uV", sample_frequency=fs, physical_max=500.0, physical_min=-500.0,
+                  digital_max=32767, digital_min=-32768)
+    writer = pyedflib.EdfWriter(str(path), 2, file_type=pyedflib.FILETYPE_EDFPLUS)
+    writer.setSignalHeaders([{**header, "label": "EMG1-EMG2"}, {**header, "label": "C4-A1"}])
+    writer.setStartdatetime(start)
+    writer.writeSamples([chin_volts * 1e6, eeg * 1e6])
+    writer.close()
+
+
+def test_load_subject_slices_rem_from_the_right_place_in_the_signal(tmp_path):
+    """Regresja end-to-end: stary kod (start = i * 30) wycinalby REM z [30, 90) s,
+    gdzie EMG jest ciche; prawdziwy REM (wg Time) lezy w [90, 150) s, gdzie EMG jest glosne."""
+    fs = 200
+    rng = np.random.default_rng(0)
+    chin = rng.normal(0, 2e-6, fs * 300)
+    chin[90 * fs:150 * fs] = rng.normal(0, 50e-6, 60 * fs)
+    _write_edf(tmp_path / "rbd9.edf", datetime.datetime(2000, 1, 1, 23, 58, 0), chin, fs)
+    (tmp_path / "rbd9.txt").write_text(
+        _txt([("S2", "23:59:00"), ("R", "23:59:30"), ("R", "00:00:00"), ("S2", "00:00:30")]), encoding="latin-1"
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        epochs = CAPSleepLoader(tmp_path, target_fs=fs).load_subject("rbd9")
+
+    rem = [e for e in epochs if e.stage == "REM"]
+    assert [e.start_sec for e in rem] == [90.0, 120.0]
+    rem_rms = [np.sqrt(np.mean(e.emg_chin ** 2)) for e in rem]
+    nrem_rms = [np.sqrt(np.mean(e.emg_chin ** 2)) for e in epochs if e.stage == "N2"]
+    assert min(rem_rms) > 10 * max(nrem_rms)
+    assert all(e.is_rbd for e in epochs)
+    assert [e.epoch_idx for e in epochs] == [0, 1, 2, 3]

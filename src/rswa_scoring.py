@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.ndimage import minimum_filter1d
 
 
 @dataclass
@@ -82,3 +83,131 @@ def score_rswa(
         atonia_lost=atonia_lost,
         rswa_index=rswa_index,
     )
+
+
+# ---------------------------------------------------------------------------
+# Dlaczego powyzszy score_rswa dal rswa_index=0.0 dla rbd1 (2026-09-23)
+# ---------------------------------------------------------------------------
+# To nie musi byc blad danych -- to w duzej mierze wlasnosc samej reguly:
+# (1) fizjologicznie napiecie EMG brody w REM jest NIZSZE niz w NREM, wiec
+#     prog "2x mediana NREM" jest bardzo wysoki wzgledem atonicznego tla REM;
+# (2) aktywnosc fazowa RSWA to wybuchy 0.1-5 s -- RMS z calych 30 s je
+#     rozmywa (5 s wybuchu o 3x amplitudzie tla daje RMS epoki ~1.6x tla);
+# (3) RMS surowego sygnalu (bez pasma 10-100 Hz) mierzy tez dryf i EKG.
+# Ponizej dwie metryki blizsze temu, jak RSWA liczy literatura. Obie sa
+# CIAGLE (bez progu klinicznego) -- prog decyzyjny ma byc wybierany w LOSO
+# (src/evaluate.py), a nie przepisany z publikacji o innym pasmie/sprzecie.
+
+
+def mini_epoch_rms(signal: np.ndarray, fs: float, mini_epoch_s: float = 3.0) -> np.ndarray:
+    """RMS w kolejnych, rozlacznych mini-epokach (reszta na koncu odrzucana)."""
+    n = int(round(mini_epoch_s * fs))
+    if n <= 0:
+        raise ValueError("mini_epoch_s * fs musi dawac co najmniej 1 probke")
+    n_mini = len(signal) // n
+    if n_mini == 0:
+        return np.empty(0)
+    blocks = np.asarray(signal[: n_mini * n], dtype=np.float64).reshape(n_mini, n)
+    return np.sqrt(np.mean(np.square(blocks), axis=1))
+
+
+@dataclass
+class MiniEpochRSWAResult:
+    mini_rms: np.ndarray  # (n_rem_epochs, n_mini) RMS per 3-s mini-epoka
+    background_rms: float  # atoniczne tlo REM tego pacjenta
+    active: np.ndarray  # (n_rem_epochs, n_mini) bool
+    rswa_mini_index: float  # odsetek mini-epok REM z aktywnoscia ("any", SINBAR-podobne)
+    tonic_epoch_fraction: float  # odsetek epok 30 s z aktywnoscia w >=50% mini-epok
+
+
+def score_rswa_mini_epochs(
+    rem_epoch_signals: list[np.ndarray],
+    fs: float,
+    mini_epoch_s: float = 3.0,
+    background_percentile: float = 10.0,
+    threshold_multiplier: float = 2.0,
+    tonic_min_fraction: float = 0.5,
+) -> MiniEpochRSWAResult:
+    """RSWA w 3-s mini-epokach wzgledem atonicznego tla REM (inspirowane SINBAR).
+
+    SINBAR (Frauscher i wsp. 2012) liczy aktywnosc w 3-s mini-epokach REM
+    wzgledem amplitudy tla (atonii) -- nie wzgledem NREM. Tu tlo to
+    `background_percentile` rozkladu RMS mini-epok REM tego pacjenta.
+    Ograniczenie: przy niemal ciaglej aktywnosci tonicznej (ciezkie RBD)
+    niski percentyl tez rosnie i indeks jest ZANIZONY -- to blad
+    konserwatywny, ale realny. Sygnaly powinny byc juz po emg_bandpass().
+
+    To NIE jest wizualny scoring SINBAR (brak kryteriow czasu trwania
+    wybuchu 0.1-5 s, brak FDS) -- nie porownywac liczbowo z progami z
+    publikacji bez walidacji.
+    """
+    if not rem_epoch_signals:
+        return MiniEpochRSWAResult(np.empty((0, 0)), float("nan"), np.empty((0, 0), dtype=bool), float("nan"), float("nan"))
+    mini = np.stack([mini_epoch_rms(sig, fs, mini_epoch_s) for sig in rem_epoch_signals])
+    if mini.size == 0:
+        raise ValueError(f"Epoki REM krotsze niz jedna mini-epoka ({mini_epoch_s} s przy fs={fs} Hz).")
+    background = float(np.percentile(mini, background_percentile))
+    if background <= 0:
+        raise ValueError("Tlo EMG REM <= 0 -- kanal plaski albo odlaczony elektrodowo.")
+    active = mini > threshold_multiplier * background
+    per_epoch = active.mean(axis=1)
+    return MiniEpochRSWAResult(
+        mini_rms=mini,
+        background_rms=background,
+        active=active,
+        rswa_mini_index=float(active.mean()),
+        tonic_epoch_fraction=float(np.mean(per_epoch >= tonic_min_fraction)),
+    )
+
+
+def _contiguous_runs(epoch_starts: np.ndarray, epoch_len_s: float) -> list[np.ndarray]:
+    """Dzieli indeksy epok na ciagi kolejnych (start co epoch_len_s)."""
+    if len(epoch_starts) == 0:
+        return []
+    breaks = np.where(~np.isclose(np.diff(epoch_starts), epoch_len_s))[0] + 1
+    return np.split(np.arange(len(epoch_starts)), breaks)
+
+
+def rem_atonia_index(
+    rem_epoch_signals: list[np.ndarray],
+    fs: float,
+    epoch_starts_s: np.ndarray | None = None,
+    to_microvolts: float = 1e6,
+    noise_window_s: int = 60,
+) -> float:
+    """REM Atonia Index (Ferri i wsp. 2008; korekcja szumu: Ferri i wsp. 2010).
+
+    1) sygnal po emg_bandpass(), wyprostowany, srednia amplituda w 1-s mini-epokach [uV];
+    2) korekcja szumu: odjecie minimum z okna ruchomego `noise_window_s` mini-epok
+       wycentrowanego na kazdej (liczone w obrebie ciaglych odcinkow REM);
+    3) RAI = %(amp <= 1 uV) / (100 - %(1 < amp <= 2 uV)).
+    RAI w [0, 1]; 1 = pelna atonia. Zalezy od BEZWZGLEDNEJ amplitudy w uV --
+    wiec od wzmocnienia/impedancji w danym laboratorium CAP. Progi z
+    literatury (ok. 0.8-0.9) traktowac jako orientacyjne, nie przenosic 1:1.
+
+    `to_microvolts=1e6` zaklada wejscie w woltach (tak zwraca MNE).
+    """
+    if not rem_epoch_signals:
+        return float("nan")
+    per_epoch_amp = [
+        np.abs(np.asarray(sig, dtype=np.float64) * to_microvolts)[: (len(sig) // int(fs)) * int(fs)]
+        .reshape(-1, int(fs))
+        .mean(axis=1)
+        for sig in rem_epoch_signals
+    ]
+    epoch_len_s = len(rem_epoch_signals[0]) / fs
+    starts = (
+        np.asarray(epoch_starts_s, dtype=float)
+        if epoch_starts_s is not None
+        else np.arange(len(rem_epoch_signals)) * epoch_len_s
+    )
+    corrected = []
+    for run in _contiguous_runs(starts, epoch_len_s):
+        amp = np.concatenate([per_epoch_amp[i] for i in run])
+        floor = minimum_filter1d(amp, size=noise_window_s + 1, mode="nearest")
+        corrected.append(np.clip(amp - floor, 0.0, None))
+    amp_all = np.concatenate(corrected)
+    p_atonic = np.mean(amp_all <= 1.0)
+    p_mid = np.mean((amp_all > 1.0) & (amp_all <= 2.0))
+    denom = 1.0 - p_mid
+    return float(p_atonic / denom) if denom > 0 else float("nan")
