@@ -42,3 +42,24 @@ def test_extract_rem_epochs_only_returns_rem_labeled_windows():
     assert len(rem_epochs) == 2
     expected_first = signal[4 * epoch_len_samples : 5 * epoch_len_samples]
     np.testing.assert_array_equal(rem_epochs[0], expected_first)
+
+
+def test_emg_bandpass_removes_drift_ecg_band_and_mains():
+    from src.preprocessing import emg_bandpass
+
+    fs = 200.0
+    t = np.arange(0, 30, 1 / fs)
+    muscle = np.sin(2 * np.pi * 30 * t)  # w pasmie EMG
+    drift = 5.0 + 3.0 * np.sin(2 * np.pi * 0.2 * t)  # DC + dryf
+    ecg_like = 2.0 * np.sin(2 * np.pi * 1.2 * t)
+    mains = 2.0 * np.sin(2 * np.pi * 50 * t)
+    out = emg_bandpass(muscle + drift + ecg_like + mains, fs)
+    core = slice(int(2 * fs), int(-2 * fs))  # bez brzegow filtfilt
+    np.testing.assert_allclose(out[core], muscle[core], atol=0.1)
+
+
+def test_emg_bandpass_caps_upper_edge_below_nyquist():
+    from src.preprocessing import emg_bandpass
+
+    out = emg_bandpass(np.random.default_rng(0).normal(size=2000), fs=200.0)  # 100 Hz == Nyquist
+    assert np.all(np.isfinite(out))

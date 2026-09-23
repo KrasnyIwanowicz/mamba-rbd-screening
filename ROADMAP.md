@@ -1,5 +1,8 @@
 # Roadmap
 
+Legend: `[x]` done · `[~]` code ready and tested on synthetic data, still
+needs a run on the real CAP download · `[ ]` not started.
+
 Phased like the other two projects. Each phase should end with something that
 runs on synthetic data (for CI) before it's tried on the real CAP dataset —
 same discipline as `parkinsons-eeg-classifier`'s 17 synthetic-data tests.
@@ -11,36 +14,52 @@ same discipline as `parkinsons-eeg-classifier`'s 17 synthetic-data tests.
       signal) vs. hypotheses to test (dt-aware Mamba in this domain, EMG→IMU
       transfer) vs. things that are just wrong until shown otherwise
       (dt-aware Mamba is NOT a proven commercial advantage — see PLAsTiCC result)
-- [ ] `git submodule add` the sleep-staging repo instead of copying `mamba_block.py`
+- [x] `git submodule add` the sleep-staging repo instead of copying `mamba_block.py`
       a third time — one canonical implementation, not three forks of it
 
 ## Phase 1 — Data audit (before writing the loader)
-- [ ] Download CAP Sleep Database, inventory actual montages per RBD subject
+- [~] Download CAP Sleep Database, inventory actual montages per RBD subject
+      (`scripts/download_cap.py`, `scripts/audit_cap_channels.py`; so far only
+      rbd1 is audited in `reports/cap_channel_audit.csv`)
       (CAP is a multi-lab archive — don't assume every recording has the same
       channels; the parkinsons-eeg-classifier README's "structure as actually
       shipped" section is the right template for how to document this)
-- [ ] Confirm which subjects have both a hypnogram AND scored RSWA/EMG events
-      (not all CAP annotations are equally complete)
-- [ ] Decide the label unit: per-30s-REM-epoch atonia loss (fine-grained) vs.
+- [~] Confirm which subjects have both a hypnogram AND scored RSWA/EMG events
+      (not all CAP annotations are equally complete). CAP has **no** scored
+      RSWA events (see docs/technical_premise.md), so this becomes: hypnogram
+      present, aligned to the EDF, with REM and N2/N3 epochs. The audit now
+      reports this per subject (`hyp_offset_s`, `hyp_gaps`, `n_rem_epochs`, ...)
+- [x] Decide the label unit: per-30s-REM-epoch atonia loss (fine-grained) vs.
       per-subject RBD/control (coarse) — probably need both, like the PD project
-      did (epoch-level AND subject-level accuracy)
+      did (epoch-level AND subject-level accuracy).
+      **Decision:** subject-level diagnosis is the only ground truth. Per-epoch
+      RSWA values are rule-derived measurements, not labels, so no per-epoch
+      accuracy is reported against them.
 
 ## Phase 2 — Sleep stager transfer
-- [ ] Run the existing `mamba-eeg-sleep-staging` checkpoint on CAP recordings
+- [~] Run the existing `mamba-eeg-sleep-staging` checkpoint on CAP recordings
+      (`scripts/evaluate_stager_on_cap.py` + `src/staging/cap_stager.py`;
+      blocked on the checkpoint, which is not in git: train it in the submodule
+      or copy `mamba_best.pt` to `external/sleep_staging/results/`)
       (different hardware/montage than Sleep-EDF-20 — expect a domain-shift
       accuracy drop, measure it, don't assume it transfers cleanly)
 - [ ] If the drop is large: decide fine-tune vs. retrain-from-scratch on CAP
-- [ ] Output: per-subject list of REM epoch windows
+- [~] Output: per-subject list of REM epoch windows (`reports/stager_rem_windows.json`)
 
 ## Phase 3 — RSWA detector (EMG ground truth)
-- [ ] Baseline: EMG RMS/amplitude threshold per REM epoch (the actual clinical
+- [x] Baseline: EMG RMS/amplitude threshold per REM epoch (the actual clinical
       scoring heuristic — this is the floor to beat, same role as the SVM
-      baseline in parkinsons-eeg-classifier)
-- [ ] Learned classifier: EMG + EEG features -> atonia maintained/lost per
+      baseline in parkinsons-eeg-classifier). `src/rswa_scoring.py`: legacy
+  30-s rule plus 3-s mini-epoch index and REM Atonia Index. Subject-level
+  evaluation with LOSO-chosen thresholds: `scripts/evaluate_rswa.py`.
+  Numbers on real CAP are still missing (`[~]`).
+- [~] Learned classifier: EMG + EEG features -> atonia maintained/lost per
       REM epoch. Leave-one-subject-out CV (same rigor as the PD project — this
       dataset is also small, n≈16 RBD + controls, so subject leakage is the
-      main way to get a fake-looking result)
-- [ ] Report accuracy, sensitivity/specificity, AND per-seed variance — the PD
+      main way to get a fake-looking result). `src/training/train_rbd.py` now
+  runs every LOSO fold over rbd/n subjects only, for several seeds. Note: with no
+  per-epoch labels it predicts *subject* diagnosis, not per-epoch atonia.
+- [~] Report accuracy, sensitivity/specificity, AND per-seed variance — the PD
       project's LSTM had a 15-point spread across 3 seeds; expect similar here
       and report it, don't hide behind a single lucky run
 
@@ -70,7 +89,9 @@ same discipline as `parkinsons-eeg-classifier`'s 17 synthetic-data tests.
       solved in the pipeline
 
 ## Phase 6 — End-to-end pipeline + night-level score
-- [ ] Chain Phase 2 + Phase 3(or 5) into `src/pipeline.py`
+- [~] Chain Phase 2 + Phase 3(or 5) into `src/pipeline/rbd_pipeline.py`
+      (reference hypnogram or auto-stager -> REM -> RSWA metrics -> night score;
+      no label without a LOSO-calibrated threshold)
 - [ ] Compare against the aktygrafia/GBT baseline the concept doc references
       as the incumbent approach — that's the actual competitive benchmark,
       not "no baseline"
@@ -80,7 +101,7 @@ same discipline as `parkinsons-eeg-classifier`'s 17 synthetic-data tests.
       to this pipeline: which features/channels drove the RSWA call
 
 ## Phase 8 — MLOps
-- [ ] Tests on synthetic data (no download needed for CI), CI workflow, mypy
+- [x] Tests on synthetic data (no download needed for CI), CI workflow, mypy
       — same bar as `parkinsons-eeg-classifier`
 
 ## Phase 9 — "Real startup" layer (not code)

@@ -18,6 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.data.cap_loader import CAPSleepLoader
+from src.preprocessing import emg_bandpass
 from src.rswa_scoring import compute_nrem_baseline
 
 
@@ -53,9 +54,9 @@ def diagnose(loader: CAPSleepLoader, subject_id: str) -> int:
 
     raw = mne.io.read_raw_edf(edf_path, preload=False, verbose="ERROR")
     ch_names = raw.ch_names
-    chin_ch = loader._find_channel(ch_names, [r"(?i)chin", r"(?i)submental", r"(?i)emg1[-_]emg2"])
-    leg_ch = loader._find_channel(ch_names, [r"(?i)dx\d*[-_]dx\d*", r"(?i)dx", r"(?i)tibial"])
-    eeg_ch = loader._find_channel(ch_names, [r"(?i)c4[-_]a1", r"(?i)c3[-_]a2", r"(?i)c4", r"(?i)c3"])
+    chin_ch = loader._find_channel(ch_names, loader.chin_patterns)
+    leg_ch = loader._find_channel(ch_names, loader.leg_patterns)
+    eeg_ch = loader._find_channel(ch_names, loader.eeg_patterns)
 
     print(f"=== {subject_id} ===\n\n--- Wszystkie kanaly w pliku EDF ---")
     for index, channel in enumerate(ch_names):
@@ -82,6 +83,15 @@ def diagnose(loader: CAPSleepLoader, subject_id: str) -> int:
     print("\n--- RMS EMG per grupa epok (surowe, przed progowaniem) ---")
     print(f"  REM : {describe(rem_rms)}")
     print(f"  NREM (N2+N3): {describe(nrem_rms)}")
+    # Porownanie z pasmem EMG 10-90 Hz (per epoka -- tylko orientacyjnie; scripts/
+    # run_rswa_pipeline.py filtruje cala noc). Jesli po filtracji stosunek REM/NREM
+    # zmienia sie mocno, surowy RMS byl zdominowany przez dryf/EKG, nie miesien.
+    fs = float(epochs[0].sampling_rate)
+    rem_rms_f = [rms(emg_bandpass(e.emg_chin, fs)) for e in epochs if e.stage == "REM"]
+    nrem_rms_f = [rms(emg_bandpass(s, fs)) for s in nrem_signals]
+    print("\n--- RMS EMG po emg_bandpass (10-90 Hz + notch 50 Hz) ---")
+    print(f"  REM : {describe(rem_rms_f)}")
+    print(f"  NREM (N2+N3): {describe(nrem_rms_f)}")
     if not rem_rms or not nrem_signals:
         print("\nNie da sie porownac REM z NREM: brakuje wymaganych epok.")
         return 1

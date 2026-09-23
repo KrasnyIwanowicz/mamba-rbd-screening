@@ -5,9 +5,12 @@ No raw data is committed to this repo (clinical PSG data, and too large for git)
 ## CAP Sleep Database (primary)
 
 ```bash
-pip install wfdb
-python -c "import wfdb; wfdb.dl_database('capslpdb', dl_dir='data/raw/capslpdb')"
+python scripts/download_cap.py                      # only rbd1-22 and n1-16 (.edf + .txt)
+python scripts/download_cap.py --subjects rbd1 n1   # a subset
 ```
+
+(The whole database, 108 recordings / ~40 GB, is also available via
+`wfdb.dl_database('capslpdb', ...)`, but only the rbd and n groups are used.)
 
 Source: https://physionet.org/content/capslpdb/1.0.0/
 License: check the current PhysioNet license page before any commercial use --
