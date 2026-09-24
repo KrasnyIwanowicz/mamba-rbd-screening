@@ -108,9 +108,10 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", default="data/raw/capslpdb", help="Folder z pobranymi .edf/.txt z CAP Sleep Database")
     parser.add_argument("--groups", nargs="+", default=["rbd", "n"], help="Ktore grupy przetworzyc")
     parser.add_argument("--output", default="reports/rswa_scores.csv")
+    parser.add_argument("--subjects", nargs="+", default=None, help="np. rbd1 rbd2 n1 (nadpisuje --groups)")
     args = parser.parse_args()
 
-    subject_ids = [
+    subject_ids = args.subjects or [
         f"{g}{i}" for g in args.groups if g in DEFAULT_GROUP_COUNTS for i in range(1, DEFAULT_GROUP_COUNTS[g] + 1)
     ]
 

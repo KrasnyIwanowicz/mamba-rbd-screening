@@ -72,9 +72,18 @@ def audit_hypnogram(txt_file: Path, recording_start, recording_sec: float) -> di
     }
 
 
-def audit_cap_database(data_dir: str | Path, output_csv: str = "reports/cap_channel_audit.csv"):
+def audit_cap_database(
+    data_dir: str | Path,
+    output_csv: str = "reports/cap_channel_audit.csv",
+    subjects: list[str] | None = None,
+):
     data_path = Path(data_dir)
     edf_files = sorted(list(data_path.glob("*.edf")))
+    if subjects:
+        missing = sorted(set(subjects) - {f.stem for f in edf_files})
+        if missing:
+            print(f"[!] Brak plikow .edf w {data_path} dla: {', '.join(missing)}")
+        edf_files = [f for f in edf_files if f.stem in set(subjects)]
     
     if not edf_files:
         print(f"[!] Nie znaleziono plików .edf w {data_path}")
@@ -149,5 +158,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default="data/raw/capslpdb")
     parser.add_argument("--output", default="reports/cap_channel_audit.csv")
+    parser.add_argument("--subjects", nargs="+", default=None, help="np. rbd1 n1 (domyslnie: wszystkie .edf w --data-dir)")
     args = parser.parse_args()
-    audit_cap_database(args.data_dir, args.output)
+    audit_cap_database(args.data_dir, args.output, args.subjects)
