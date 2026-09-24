@@ -66,3 +66,40 @@ def test_rank_auc_matches_sklearn_with_ties():
     labels = rng.integers(0, 2, 40)
     scores = rng.integers(0, 5, 40).astype(float)  # duzo remisow
     assert _rank_auc(labels, scores) == pytest.approx(roc_auc_score(labels, scores))
+
+
+def test_negative_control_warns_when_signal_level_separates_as_well_as_rai(tmp_path):
+    from scripts.evaluate_rswa import evaluate_csv
+
+    rng = np.random.default_rng(0)
+    rbd_gain = rng.uniform(4e-6, 6e-6, 6)
+    n_gain = rng.uniform(0.5e-6, 2e-6, 6)
+    df = pd.DataFrame({
+        "subject_id": [f"rbd{i}" for i in range(1, 7)] + [f"n{i}" for i in range(1, 7)],
+        "group": ["rbd"] * 6 + ["n"] * 6,
+        "nrem_baseline_rms": np.r_[rbd_gain, n_gain],
+        "rem_atonia_index": np.r_[rng.uniform(0.5, 0.7, 6), rng.uniform(0.95, 1.0, 6)],
+        "rswa_mini_index": rng.uniform(0, 1, 12),
+    })
+    df.to_csv(tmp_path / "s.csv", index=False)
+    rows = evaluate_csv(tmp_path / "s.csv", tmp_path / "e.csv")
+    roles = {r["metric"]: r["role"] for r in rows}
+    assert roles["nrem_baseline_rms"] == "negative_control" and roles["rem_atonia_index"] == "rswa_metric"
+
+    from scripts.evaluate_rswa import confound_warnings
+
+    text = "\n".join(confound_warnings(rows))
+    assert "nrem_baseline_rms" in text and "rem_atonia_index" in text
+
+
+def test_no_confound_warning_when_controls_do_not_separate(tmp_path):
+    from scripts.evaluate_rswa import confound_warnings, evaluate_csv
+
+    df = pd.DataFrame({
+        "subject_id": [f"rbd{i}" for i in range(1, 5)] + [f"n{i}" for i in range(1, 5)],
+        "group": ["rbd"] * 4 + ["n"] * 4,
+        "nrem_baseline_rms": [1, 3, 5, 7, 2, 4, 6, 8],
+        "rem_atonia_index": [0.5, 0.6, 0.55, 0.65, 0.95, 0.97, 0.99, 0.96],
+    })
+    df.to_csv(tmp_path / "s.csv", index=False)
+    assert confound_warnings(evaluate_csv(tmp_path / "s.csv", tmp_path / "e.csv")) == []

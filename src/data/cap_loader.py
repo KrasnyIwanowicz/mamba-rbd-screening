@@ -44,6 +44,7 @@ _SUBJECT_ID_RE = re.compile(r"^(?P<group>" + "|".join(CAP_GROUPS) + r")(?P<num>\
 CHIN_PATTERNS = [r"(?i)chin", r"(?i)submental", r"(?i)emg1[-_]emg2"]
 LEG_PATTERNS = [r"(?i)dx\d*[-_]dx\d*", r"(?i)dx", r"(?i)tibial"]
 EEG_PATTERNS = [r"(?i)c4[-_]a1", r"(?i)c3[-_]a2", r"(?i)c4", r"(?i)c3"]
+ECG_PATTERNS = [r"(?i)ecg"]
 
 _SECONDS_PER_DAY = 24 * 3600
 
@@ -100,6 +101,7 @@ class EpochData:
     eeg_central: np.ndarray | None  # [samples] lub None
     sampling_rate: int
     is_rbd: bool
+    ecg: np.ndarray | None = None  # [samples] surowe EKG (do kontroli przesluchu EKG w EMG brody)
 
 
 class CAPSleepLoader:
@@ -125,6 +127,7 @@ class CAPSleepLoader:
         chin_patterns: list[str] | None = None,
         leg_patterns: list[str] | None = None,
         eeg_patterns: list[str] | None = None,
+        ecg_patterns: list[str] | None = None,
         preprocess_emg: bool = False,
     ):
         self.data_dir = Path(data_dir)
@@ -133,6 +136,7 @@ class CAPSleepLoader:
         self.chin_patterns = chin_patterns or CHIN_PATTERNS
         self.leg_patterns = leg_patterns or LEG_PATTERNS
         self.eeg_patterns = eeg_patterns or EEG_PATTERNS
+        self.ecg_patterns = ecg_patterns or ECG_PATTERNS
         # True -> EMG (broda, noga) filtrowane emg_bandpass() na CALEJ nocy przed
         # cieciem na epoki (brak artefaktow brzegowych filtra w kazdej epoce).
         # Domyslnie False, zeby nie zmieniac wejscia istniejacych modeli.
@@ -249,12 +253,13 @@ class CAPSleepLoader:
         chin_ch = self._find_channel(ch_names, self.chin_patterns)
         leg_ch = self._find_channel(ch_names, self.leg_patterns)
         eeg_ch = self._find_channel(ch_names, self.eeg_patterns)
+        ecg_ch = self._find_channel(ch_names, self.ecg_patterns)
 
         if chin_ch is None:
             raise ValueError(f"Pacjent {subject_id} nie posiada kanalu Chin EMG w {ch_names}")
 
         # Wczytujemy i resamplujemy tylko potrzebne kanaly (nie cale 15+).
-        picks = [ch for ch in dict.fromkeys([chin_ch, leg_ch, eeg_ch]) if ch is not None]
+        picks = [ch for ch in dict.fromkeys([chin_ch, leg_ch, eeg_ch, ecg_ch]) if ch is not None]
         raw.pick(picks)
         raw.load_data(verbose="ERROR")
         if raw.info["sfreq"] != self.target_fs:
@@ -293,6 +298,7 @@ class CAPSleepLoader:
             chin_data = emg_bandpass(chin_data, self.target_fs)
             leg_data = emg_bandpass(leg_data, self.target_fs) if leg_data is not None else None
         eeg_data = raw.get_data(picks=[eeg_ch])[0] if eeg_ch else None
+        ecg_data = raw.get_data(picks=[ecg_ch])[0] if ecg_ch else None
         total_samples = len(chin_data)
 
         for i, row in enumerate(df_stages.itertuples(index=False)):
@@ -320,6 +326,7 @@ class CAPSleepLoader:
                     eeg_central=eeg_data[start_idx:end_idx] if eeg_data is not None else None,
                     sampling_rate=self.target_fs,
                     is_rbd=is_rbd,
+                    ecg=ecg_data[start_idx:end_idx] if ecg_data is not None else None,
                 )
             )
 
