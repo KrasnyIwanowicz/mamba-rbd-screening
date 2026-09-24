@@ -101,7 +101,8 @@ python -m pytest -q                  # synthetic-data tests, no download needed
 python scripts/download_cap.py                               # rbd1-22 + n1-16, .edf + .txt
 python scripts/audit_cap_channels.py                         # Phase 1: channels + hypnogram alignment
 python scripts/run_rswa_pipeline.py                          # Phase 3: RSWA metrics per subject
-python scripts/evaluate_rswa.py                              # rbd vs n: AUC, LOSO sens/spec
+python scripts/evaluate_rswa.py                              # rbd vs n: AUC, LOSO sens/spec, negative controls
+python scripts/plot_rem_epochs.py rbd2 n1                    # look at what counts as "activity" (EMG + ECG)
 python scripts/evaluate_stager_on_cap.py --checkpoint external/sleep_staging/results/mamba_best.pt   # Phase 2
 python src/training/train_rbd.py --seeds 0 1 2               # Mamba classifier, LOSO x seeds
 ```

@@ -75,6 +75,26 @@ Update this file, don't quietly let the README drift from it.
   "epoch comes from an RBD patient", and it is evaluated only at subject
   level with patient-grouped CV.
 
+## First real-data check, 2026-09-24 (6 recordings: rbd1-3, n1-3)
+
+- **The alignment bug was real and large.** 4/6 hypnograms start after the
+  EDF start (n1 +3.5 min, n3 +51 min, rbd1 +2 h 35 min, n2 +3 h 7 min) and
+  4/6 have single-epoch scoring gaps. With the Time-based alignment, the
+  hypnogram ends within 1 s of the EDF end for rbd1, n1 and n3, which is strong
+  evidence that the EDF header time is correct and the offset is real (the
+  scoring starts at lights-off). Every result computed with the old
+  row-index loader was cut from the wrong part of the night.
+- **Mini-epoch index and RAI separate 3 rbd from 3 n perfectly**; the old
+  30-s rule does not. With 3 vs 3 that has p = 1/20 by chance alone. Not evidence yet.
+- **Open confound: overall chin EMG amplitude.** NREM chin RMS is 4.6-5.8 uV
+  in rbd1-3 vs 0.65-1.9 uV in n1-3: it separates the groups on its own, and
+  it is not RSWA. RAI uses absolute uV thresholds, so it is exposed to this;
+  the mini-epoch index is relative to each subject's own REM floor and is
+  not. `scripts/evaluate_rswa.py` now scores NREM/REM amplitude and ECG
+  leakage as negative controls and warns when they separate the groups as well
+  as a metric does. `ecg_contamination_ratio` / `rswa_mini_index_ecg_gated`
+  (src/artifacts.py) test whether "activity" is heartbeat leakage.
+
 ## Hypothesis - to be tested
 
 - **Dt-aware Mamba discretization might help on irregularly-gapped overnight

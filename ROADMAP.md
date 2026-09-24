@@ -19,8 +19,9 @@ same discipline as `parkinsons-eeg-classifier`'s 17 synthetic-data tests.
 
 ## Phase 1 — Data audit (before writing the loader)
 - [~] Download CAP Sleep Database, inventory actual montages per RBD subject
-      (`scripts/download_cap.py`, `scripts/audit_cap_channels.py`; so far only
-      rbd1 is audited in `reports/cap_channel_audit.csv`)
+      (`scripts/download_cap.py`, `scripts/audit_cap_channels.py`; 6/38
+      audited so far: rbd1-3, n1-3. Hypnogram offset in 4/6, up to 3 h;
+      see docs/technical_premise.md)
       (CAP is a multi-lab archive — don't assume every recording has the same
       channels; the parkinsons-eeg-classifier README's "structure as actually
       shipped" section is the right template for how to document this)

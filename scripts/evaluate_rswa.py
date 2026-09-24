@@ -21,7 +21,21 @@ METRICS = {
     "rswa_mini_index": True,
     "tonic_epoch_fraction": True,
     "rem_atonia_index": False,  # RAI: nizszy = mniej atonii = bardziej RBD
+    "rswa_mini_index_ecg_gated": True,
 }
+
+# Kontrole negatywne: wielkosci, ktore NIE mierza RSWA. Jesli ktoras z nich
+# rozdziela rbd od n rownie dobrze jak metryka RSWA, ta metryka moze mierzyc
+# sprzet/wzmocnienie/przesluch EKG, a nie atonie. Tu liczy sie "separowalnosc"
+# max(AUC, 1-AUC) -- kierunek nie ma znaczenia, kazda roznica jest podejrzana.
+NEGATIVE_CONTROLS = {
+    "nrem_baseline_rms": True,        # ogolny poziom EMG brody w NREM [V] -- zalezy od wzmocnienia
+    "rem_background_rms": True,       # atoniczne tlo REM [V] -- j.w.
+    "ecg_contamination_ratio": True,  # przesluch EKG do EMG brody
+}
+# Metryki zalezne od BEZWZGLEDNEJ amplitudy -- porownywane z kontrolami amplitudy.
+AMPLITUDE_DEPENDENT = {"rem_atonia_index"}
+CONFOUND_WARNING_SEPARABILITY = 0.8
 
 
 def evaluate_csv(scores_csv: str | Path, output_csv: str | Path) -> list[dict]:
@@ -30,7 +44,7 @@ def evaluate_csv(scores_csv: str | Path, output_csv: str | Path) -> list[dict]:
     labels = (df["group"] == "rbd").astype(int).to_numpy()
     rows: list[dict] = []
     n_total, ci_missing = 0, True
-    for metric, higher_means_rbd in METRICS.items():
+    for metric, higher_means_rbd in {**METRICS, **NEGATIVE_CONTROLS}.items():
         if metric not in df.columns:
             print(f"[-] {metric}: brak kolumny w {scores_csv} -- uruchom ponownie scripts/run_rswa_pipeline.py")
             continue
@@ -43,6 +57,8 @@ def evaluate_csv(scores_csv: str | Path, output_csv: str | Path) -> list[dict]:
         n_total, ci_missing = r.n_positive + r.n_negative, bool(np.isnan(r.auc_ci95[0]))
         rows.append({
             "metric": r.metric,
+            "role": "negative_control" if metric in NEGATIVE_CONTROLS else "rswa_metric",
+            "separability": round(max(r.auc, 1.0 - r.auc), 3),
             "n_rbd": r.n_positive,
             "n_control": r.n_negative,
             "auc": round(r.auc, 3),
@@ -64,7 +80,32 @@ def evaluate_csv(scores_csv: str | Path, output_csv: str | Path) -> list[dict]:
         print(f"\nZapisano do {output_csv}")
         if n_total < 20 or ci_missing:
             print("UWAGA: bardzo mala proba -- wyniki czysto orientacyjne.")
+        for warning in confound_warnings(rows):
+            print(warning)
     return rows
+
+
+def confound_warnings(rows: list[dict]) -> list[str]:
+    """Ostrzezenia, gdy kontrola negatywna rozdziela grupy tak dobrze jak metryki RSWA."""
+    controls = {r["metric"]: r["separability"] for r in rows if r["role"] == "negative_control"}
+    warnings = []
+    for name, sep in controls.items():
+        if sep < CONFOUND_WARNING_SEPARABILITY:
+            continue
+        warnings.append(
+            f"UWAGA: kontrola negatywna {name} rozdziela rbd/n z separowalnoscia {sep:.2f} -- "
+            "grupy roznia sie czyms, co nie jest RSWA."
+        )
+        if name in ("nrem_baseline_rms", "rem_background_rms"):
+            for r in rows:
+                if r["metric"] in AMPLITUDE_DEPENDENT and r["separability"] <= sep + 0.05:
+                    warnings.append(
+                        f"  -> {r['metric']} zalezy od bezwzglednej amplitudy (progi w uV) i nie rozdziela "
+                        f"lepiej ({r['separability']:.2f}) niz sam poziom sygnalu: nie interpretowac jako RSWA."
+                    )
+        if name == "ecg_contamination_ratio":
+            warnings.append("  -> porownaj rswa_mini_index z rswa_mini_index_ecg_gated (EKG wyciete).")
+    return warnings
 
 
 def main() -> int:

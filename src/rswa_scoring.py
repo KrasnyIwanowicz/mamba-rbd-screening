@@ -99,8 +99,18 @@ def score_rswa(
 # (src/evaluate.py), a nie przepisany z publikacji o innym pasmie/sprzecie.
 
 
-def mini_epoch_rms(signal: np.ndarray, fs: float, mini_epoch_s: float = 3.0) -> np.ndarray:
-    """RMS w kolejnych, rozlacznych mini-epokach (reszta na koncu odrzucana)."""
+def mini_epoch_rms(
+    signal: np.ndarray,
+    fs: float,
+    mini_epoch_s: float = 3.0,
+    exclude: np.ndarray | None = None,
+    min_kept_fraction: float = 0.5,
+) -> np.ndarray:
+    """RMS w kolejnych, rozlacznych mini-epokach (reszta na koncu odrzucana).
+
+    exclude: maska probek pomijanych w RMS (np. okna QRS z src/artifacts.py).
+    Mini-epoka, w ktorej zostaje < min_kept_fraction probek, dostaje NaN.
+    """
     n = int(round(mini_epoch_s * fs))
     if n <= 0:
         raise ValueError("mini_epoch_s * fs musi dawac co najmniej 1 probke")
@@ -108,7 +118,14 @@ def mini_epoch_rms(signal: np.ndarray, fs: float, mini_epoch_s: float = 3.0) -> 
     if n_mini == 0:
         return np.empty(0)
     blocks = np.asarray(signal[: n_mini * n], dtype=np.float64).reshape(n_mini, n)
-    return np.sqrt(np.mean(np.square(blocks), axis=1))
+    if exclude is None:
+        return np.sqrt(np.mean(np.square(blocks), axis=1))
+    keep = ~np.asarray(exclude[: n_mini * n], dtype=bool).reshape(n_mini, n)
+    kept = keep.sum(axis=1)
+    sq = np.where(keep, np.square(blocks), 0.0).sum(axis=1)
+    rms = np.sqrt(sq / np.maximum(kept, 1))
+    rms[kept < min_kept_fraction * n] = np.nan
+    return rms
 
 
 @dataclass
@@ -127,6 +144,7 @@ def score_rswa_mini_epochs(
     background_percentile: float = 10.0,
     threshold_multiplier: float = 2.0,
     tonic_min_fraction: float = 0.5,
+    exclude_masks: list[np.ndarray] | None = None,
 ) -> MiniEpochRSWAResult:
     """RSWA w 3-s mini-epokach wzgledem atonicznego tla REM (inspirowane SINBAR).
 
@@ -143,20 +161,26 @@ def score_rswa_mini_epochs(
     """
     if not rem_epoch_signals:
         return MiniEpochRSWAResult(np.empty((0, 0)), float("nan"), np.empty((0, 0), dtype=bool), float("nan"), float("nan"))
-    mini = np.stack([mini_epoch_rms(sig, fs, mini_epoch_s) for sig in rem_epoch_signals])
+    masks = exclude_masks if exclude_masks is not None else [None] * len(rem_epoch_signals)
+    mini = np.stack([mini_epoch_rms(sig, fs, mini_epoch_s, m) for sig, m in zip(rem_epoch_signals, masks)])
     if mini.size == 0:
         raise ValueError(f"Epoki REM krotsze niz jedna mini-epoka ({mini_epoch_s} s przy fs={fs} Hz).")
-    background = float(np.percentile(mini, background_percentile))
+    valid = ~np.isnan(mini)
+    if not valid.any():
+        raise ValueError("Wszystkie mini-epoki wykluczone maska.")
+    background = float(np.percentile(mini[valid], background_percentile))
     if background <= 0:
         raise ValueError("Tlo EMG REM <= 0 -- kanal plaski albo odlaczony elektrodowo.")
-    active = mini > threshold_multiplier * background
-    per_epoch = active.mean(axis=1)
+    # NaN (mini-epoka wycieta maska) nie liczy sie ani jako aktywna, ani do mianownika.
+    active = np.where(valid, mini > threshold_multiplier * background, False)
+    with np.errstate(invalid="ignore"):
+        per_epoch = active.sum(axis=1) / valid.sum(axis=1)
     return MiniEpochRSWAResult(
         mini_rms=mini,
         background_rms=background,
         active=active,
-        rswa_mini_index=float(active.mean()),
-        tonic_epoch_fraction=float(np.mean(per_epoch >= tonic_min_fraction)),
+        rswa_mini_index=float(active.sum() / valid.sum()),
+        tonic_epoch_fraction=float(np.mean(per_epoch[~np.isnan(per_epoch)] >= tonic_min_fraction)),
     )
 
 
